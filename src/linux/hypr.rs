@@ -84,6 +84,7 @@ fn hypr_json<T: DeserializeOwned>(command: &str) -> Result<T> {
     let mut stream = UnixStream::connect(&path)
         .with_context(|| format!("Could not reach Hyprland at {}", path.display()))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.write_all(format!("j/{command}").as_bytes())?;
     let mut reply = Vec::new();
     stream.read_to_end(&mut reply)?;
@@ -213,7 +214,9 @@ pub fn window_entries(clients: &[Client], monitor: &Monitor) -> Vec<WindowEntry>
 }
 
 /// Logs the cursor every tick and the window list every second or when focus moves, like the
-/// macOS `windows::WindowLogger`.
+/// macOS `windows::WindowLogger`. Like on macOS it is only started for display targets: `frame`
+/// must be a monitor's `monitor_frame`, since windows are matched to that monitor by its origin
+/// and their bounds are relative to it.
 pub struct WindowLogger {
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<ActivityLog>>,
