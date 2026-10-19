@@ -231,6 +231,9 @@ enum Command {
         /// Recording duration in seconds (default: 5).
         #[arg(long, default_value_t = 5)]
         duration: u64,
+        /// Record until SIGINT/SIGTERM (what `scrawl toggle` starts) instead of `--duration`.
+        #[arg(long, conflicts_with = "iphone")]
+        until_stopped: bool,
         /// Optional note to attach to the bundle.
         #[arg(long)]
         note: Option<String>,
@@ -238,6 +241,9 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Start a recording, or stop the running one (bind it to a key in Hyprland).
+    #[cfg(target_os = "linux")]
+    Toggle,
     /// Build a bundle from a ScrawlKit in-app recording (`.mp4` + timeline `.json`).
     Import {
         /// The recording or its timeline; defaults to the newest pair in ~/Downloads.
@@ -1475,9 +1481,11 @@ fn main() -> Result<()> {
             window,
             iphone: true,
             duration,
+            until_stopped,
             note,
             out,
         } => {
+            anyhow::ensure!(!until_stopped, "--until-stopped is Linux-only for now");
             let bundle_dir = out.unwrap_or_else(|| {
                 handoff::default_captures_dir().join(format!("{}.scrawl", make_bundle_id()))
             });
@@ -1515,9 +1523,11 @@ fn main() -> Result<()> {
             window,
             iphone: false,
             duration,
+            until_stopped,
             note,
             out,
         } => {
+            anyhow::ensure!(!until_stopped, "--until-stopped is Linux-only for now");
             let target = discover_target(window.as_deref());
             let bundle_dir = out.unwrap_or_else(|| {
                 handoff::default_captures_dir().join(format!("{}.scrawl", make_bundle_id()))
@@ -1556,8 +1566,19 @@ fn main() -> Result<()> {
             print!("{summary}");
             Ok(())
         }
-        #[cfg(not(target_os = "macos"))]
-        Command::Record { .. } => anyhow::bail!("Recording on Linux arrives with `scrawl toggle`"),
+        #[cfg(target_os = "linux")]
+        Command::Record { iphone: true, .. } => anyhow::bail!("iPhone capture needs macOS"),
+        #[cfg(target_os = "linux")]
+        Command::Record {
+            window,
+            iphone: false,
+            duration,
+            until_stopped,
+            note,
+            out,
+        } => linux::record(window.as_deref(), duration, until_stopped, note, out),
+        #[cfg(target_os = "linux")]
+        Command::Toggle => linux::toggle::toggle(),
         Command::Import {
             recording,
             timeline,

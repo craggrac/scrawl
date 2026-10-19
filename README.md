@@ -15,6 +15,28 @@ brew install --cask kitlangton/tap/scrawl
 
 The app updates itself (Sparkle), so Homebrew leaves updates to it.
 
+## Linux (Hyprland)
+
+A Linux build records from a Hyprland key bind. It needs `wf-recorder`, `ffmpeg`, `wl-clipboard`,
+`libnotify` and fontconfig, plus [OpenWhispr](https://openwhispr.com) with its Parakeet
+(`parakeet-tdt-0.6b-v3`) model downloaded: Scrawl runs OpenWhispr's `sherpa-onnx-ws` server for
+transcription (`SCRAWL_SHERPA_WS` and `SCRAWL_PARAKEET_DIR` point elsewhere).
+
+```sh
+cargo build --release
+ln -s "$PWD/target/release/scrawl" ~/.local/bin/scrawl
+```
+
+In `hyprland.conf`:
+
+```
+bind = ALT SHIFT, S, exec, scrawl toggle
+```
+
+Press it to start and again to stop. The bundle lands in `~/.local/share/scrawl/captures/` and its
+summary on the clipboard; `scrawl send latest --session ses_…` delivers it to OpenCode. Not yet on
+Linux: ink, clicks and keys in the timeline, the pill and menu-bar app, iPhone capture, video export.
+
 ## Agents
 
 Install the agent skill for Claude Code, OpenCode, Codex and other agents:
