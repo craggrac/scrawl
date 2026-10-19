@@ -676,7 +676,6 @@ pub fn after_phone_capture(bundle: &Path) {
 
 #[cfg(target_os = "macos")]
 fn worker(jobs: &flume::Receiver<Job>) {
-    #[cfg(target_os = "macos")]
     lower_priority();
     let captures = crate::handoff::default_captures_dir();
     let mut next_pass = Instant::now() + Duration::from_secs(90);

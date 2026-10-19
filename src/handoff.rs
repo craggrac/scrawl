@@ -187,18 +187,6 @@ pub fn copy_bundle_to_clipboard(_bundle_dir: &Path) -> Result<()> {
     bail!("Image and text clipboard handoff requires macOS")
 }
 
-#[cfg(target_os = "macos")]
-#[cfg(not(target_os = "macos"))]
-pub fn paste_bundle_image_and_text(_bundle_dir: &Path) -> Result<()> {
-    bail!("Image and text paste handoff requires macOS")
-}
-
-#[cfg(target_os = "macos")]
-#[cfg(not(target_os = "macos"))]
-pub fn paste_bundle_at_target(_bundle_dir: &Path, _click_target: Option<[f32; 2]>) -> Result<()> {
-    bail!("Image and text paste handoff requires macOS")
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OpenCodeSession {
     pub id: String,
