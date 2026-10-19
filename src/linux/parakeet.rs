@@ -30,8 +30,6 @@ const CLIP_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, Deserialize)]
 pub struct SherpaResult {
     #[serde(default)]
-    pub text: String,
-    #[serde(default)]
     pub tokens: Vec<String>,
     #[serde(default)]
     pub timestamps: Vec<f64>,
@@ -113,18 +111,35 @@ fn model_dir() -> Option<PathBuf> {
         .filter(|dir| dir.join("tokens.txt").is_file())
 }
 
-/// A sherpa-onnx server of our own on a free loopback port, stopped when dropped. It is
-/// started per recording, so no model stays in memory between captures.
+/// A sherpa-onnx server of our own, stopped when dropped. It is started per recording, so no
+/// model stays in memory between captures. `sherpa-onnx-ws` has no address option and binds
+/// every interface, not just loopback; it lives only during one transcription, and a remote
+/// peer could only submit its own audio, never read ours, since each connection gets only its
+/// own result. Our client connects over loopback.
 struct Server {
     child: Child,
     port: u16,
 }
 
 impl Server {
+    /// Starts the server, once more on a fresh port if the reserved one was taken meanwhile.
     fn start(binary: &Path, model: &Path) -> Result<Self> {
+        let mut attempt = 1;
+        loop {
+            match Self::spawn(binary, model) {
+                Err(error) if attempt < 2 => {
+                    crate::capture::scrawl_log(format!("sherpa-onnx start failed, retrying: {error:#}"));
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn spawn(binary: &Path, model: &Path) -> Result<Self> {
         let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?.port();
         let file = |flag: &str, name: &str| format!("--{flag}={}", model.join(name).display());
-        let mut child = Command::new(binary)
+        let child = Command::new(binary)
             .env("LD_LIBRARY_PATH", binary.parent().unwrap_or(Path::new(".")))
             .arg(file("tokens", "tokens.txt"))
             .arg(file("encoder", "encoder.int8.onnx"))
@@ -137,8 +152,9 @@ impl Server {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("Could not start {}", binary.display()))?;
-        let stderr = child.stderr.take().context("No sherpa-onnx stderr")?;
-        let server = Self { child, port };
+        // Owned by a `Server` first, so even the early return below kills and reaps the child.
+        let mut server = Self { child, port };
+        let stderr = server.child.stderr.take().context("No sherpa-onnx stderr")?;
         let (ready, started) = std::sync::mpsc::channel();
         // Keeps draining stderr after the ready line so the pipe never fills.
         std::thread::spawn(move || {
@@ -255,7 +271,6 @@ mod tests {
     #[test]
     fn a_missing_duration_ends_at_the_next_token() {
         let result = SherpaResult {
-            text: String::new(),
             tokens: vec![" a".into(), " b".into()],
             timestamps: vec![0.5, 1.0],
             durations: vec![],
