@@ -410,6 +410,7 @@ pub fn describe_event(event: &InteractionEvent) -> String {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn timeline(bundle: &ScrawlBundle) -> Vec<String> {
     let mut items: Vec<(u64, String)> = bundle
         .transcript
@@ -812,6 +813,7 @@ pub fn smooth_laser_points(points: &[([f32; 2], f32)]) -> Vec<([f32; 2], f32)> {
 
 /// Smooths a persistent ink stroke into `(point, pressure_scale)` samples using
 /// tldraw's streamline filter + midpoint quadratic Bezier curves + simulated velocity pressure.
+#[cfg(any(target_os = "macos", test))]
 pub fn smooth_ink_points(points: &[[f32; 2]]) -> Vec<([f32; 2], f32)> {
     if points.is_empty() {
         return Vec::new();

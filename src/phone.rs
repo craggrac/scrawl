@@ -50,10 +50,10 @@ struct MirrorState {
     error: Option<String>,
 }
 
-#[cfg(target_os = "macos")]
 /// A running mirror: the helper's floating window shows the phone, records its native video
 /// with the Mac's microphone into the bundle, and reports where the picture is on screen so
 /// pointer and pen input normalize into phone-screen coordinates.
+#[cfg(target_os = "macos")]
 pub struct PhoneSession {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
@@ -1249,11 +1249,11 @@ pub fn format_setup_link(
     Ok(format!("{scheme}://scrawl?{}", query.join("&")))
 }
 
-#[cfg(target_os = "macos")]
 /// Starts Scrawl's background ScrawlKit ingest inside the GUI app: an HTTP server on
 /// `0.0.0.0:47777` the phone uploads to, and a cabled-iPhone `devicectl` watcher for when the
 /// network can't reach the Mac. Each recording becomes a `.scrawl` bundle, lands on the clipboard
 /// and is queued into the OpenCode session matching the app.
+#[cfg(target_os = "macos")]
 pub fn start_ingest_server(ui_sender: flume::Sender<LiveOverlayEvent>) {
     if let Err(err) = crate::handoff::ensure_ingest_token() {
         scrawl_log(format!("ingest token setup failed: {err:#}"));

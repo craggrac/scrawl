@@ -53,6 +53,7 @@ pub struct Live {
 
 /// Looks at the browser tab or terminal in front (`front`) or captured (`target`), and reads
 /// the open sessions. Runs while the bundle is built.
+#[cfg(target_os = "macos")]
 pub fn look_live(front: Option<&str>, target: Option<&str>, senses: &Senses) -> Live {
     let url = super::capture_url(front, target);
     let mut clues = url

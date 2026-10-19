@@ -19,6 +19,7 @@ pub const FRAME_SAMPLE_INTERVAL: Duration = Duration::from_millis(220);
 /// decoded from `recording.mp4` at full size afterwards.
 pub const CANDIDATE_EDGE: f64 = 480.0;
 /// Without a recording to decode from, the candidates are the keyframes, so keep them sharper.
+#[cfg(target_os = "macos")]
 const CANDIDATE_EDGE_NO_VIDEO: f64 = 1280.0;
 /// The candidates' memory ceiling, however long the capture runs.
 pub const CANDIDATE_BUDGET_BYTES: usize = 384 << 20;

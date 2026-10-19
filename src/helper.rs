@@ -96,9 +96,9 @@ pub struct PhoneDevice {
     pub height: u32,
 }
 
-#[cfg(target_os = "macos")]
 /// What macOS has granted Scrawl, from a fresh helper process (a long-running one can miss a
 /// Screen Recording grant).
+#[cfg(target_os = "macos")]
 pub fn permissions()
 -> Result<std::collections::BTreeMap<crate::onboarding::Permission, crate::onboarding::Status>> {
     run(&[os("permissions")], Duration::from_secs(5))

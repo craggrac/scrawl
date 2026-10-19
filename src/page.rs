@@ -10,6 +10,7 @@ use std::sync::Mutex;
 
 use serde::Deserialize;
 
+#[cfg(any(target_os = "macos", test))]
 use crate::model::{InteractionEvent, Stroke};
 
 /// Events older than this are dropped.
@@ -20,9 +21,11 @@ const MAX_TEXT: usize = 60;
 const MAX_MESSAGE: usize = 160;
 
 /// A page click this close to a Mac click (ms) is the same click.
+#[cfg(any(target_os = "macos", test))]
 const CLICK_MATCH_MS: u64 = 400;
 
 /// Seeks closer together than this read as one scrub.
+#[cfg(any(target_os = "macos", test))]
 const SEEK_RUN_MS: u64 = 1_500;
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -220,6 +223,7 @@ impl Log {
 
     /// Events between two epoch times from the tabs the user was in then: ones that were clicked,
     /// marked or focused. Background tabs' errors stay out.
+    #[cfg(any(target_os = "macos", test))]
     pub fn between(&self, from: u64, to: u64) -> Vec<Event> {
         let mut out: Vec<Event> = Vec::new();
         for tab in &self.tabs {
@@ -248,6 +252,7 @@ pub fn record(origin: &str, post: Post) {
         .record(origin, post, crate::now_epoch_ms());
 }
 
+#[cfg(target_os = "macos")]
 pub fn between(from: u64, to: u64) -> Vec<Event> {
     LOG.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -255,6 +260,7 @@ pub fn between(from: u64, to: u64) -> Vec<Event> {
 }
 
 /// `<button#new.tab-new> “New tab” in BrowserHeader (src/BrowserHeader.tsx:88)`.
+#[cfg(any(target_os = "macos", test))]
 pub fn describe(target: &Target) -> String {
     let mut element = format!(
         "<{}",
@@ -284,11 +290,13 @@ pub fn describe(target: &Target) -> String {
     parts.join(" ")
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn clock(seconds: f64) -> String {
     let s = seconds.max(0.0).round() as u64;
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn describe_media(event: &str, media: &Media) -> String {
     let name = if media.src.is_empty() {
         "video".to_owned()
@@ -309,6 +317,7 @@ fn describe_media(event: &str, media: &Media) -> String {
 
 /// Names the capture's clicks and strokes from what the page saw under them, and adds errors,
 /// failed requests and video playback as app events. `start` is the capture's start (epoch ms).
+#[cfg(any(target_os = "macos", test))]
 pub fn apply(
     page: &[Event],
     start: u64,

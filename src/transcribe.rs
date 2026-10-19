@@ -56,6 +56,7 @@ static LOGGED_NOT_CONNECTED: std::sync::Once = std::sync::Once::new();
 
 /// What the menu's Transcription submenu shows. A Hex preference stays saved while Hex is away,
 /// but the tick follows what recordings would really use.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, PartialEq, Eq)]
 pub struct MenuState {
     pub apple_checked: bool,
@@ -66,6 +67,7 @@ pub struct MenuState {
     pub models: Vec<(String, String, bool)>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn menu_state(
     preferred: Engine,
     status: Option<&crate::hex::Status>,

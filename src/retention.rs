@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -39,6 +41,7 @@ const SHRINK_EDGE: u32 = crate::phone::PHONE_FRAME_EDGE;
 /// shrunk one ~2).
 const SHRINK_ABOVE_BPS: u64 = 6_000_000;
 /// How long after a capture its video is shrunk, so pasting and sending go first.
+#[cfg(target_os = "macos")]
 const SHRINK_DELAY: Duration = Duration::from_secs(60);
 /// A daily pass shrinks bundles left alone this long (a capture whose shrink was missed, or one
 /// copied from another Mac).
@@ -78,8 +81,10 @@ pub enum Preset {
 }
 
 impl Preset {
+    #[cfg(any(target_os = "macos", test))]
     pub const ALL: [Self; 3] = [Self::Week, Self::Month, Self::Forever];
 
+    #[cfg(target_os = "macos")]
     pub fn label(self) -> &'static str {
         match self {
             Self::Week => "Video for 7 Days",
@@ -102,6 +107,7 @@ impl Preset {
 }
 
 impl Policy {
+    #[cfg(any(target_os = "macos", test))]
     pub fn preset(&self) -> Option<Preset> {
         Preset::ALL.into_iter().find(|p| p.policy() == *self)
     }
@@ -120,6 +126,7 @@ impl Policy {
     }
 
     /// Writes `"retention"`, keeping the rest of the config (and its `0600` mode) as it is.
+    #[cfg(any(target_os = "macos", test))]
     pub fn save_to(&self, path: &Path) -> Result<()> {
         crate::handoff::set_config_value_in(path, "retention", serde_json::to_value(self)?)
     }
@@ -160,8 +167,10 @@ impl Drop for Claim {
 }
 
 /// Held by a running capture; cleanup and re-encoding wait until none is.
+#[cfg(target_os = "macos")]
 pub struct Recording(());
 
+#[cfg(target_os = "macos")]
 impl Recording {
     pub fn start() -> Self {
         RECORDING.fetch_add(1, Ordering::AcqRel);
@@ -169,6 +178,7 @@ impl Recording {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for Recording {
     fn drop(&mut self) {
         RECORDING.fetch_sub(1, Ordering::AcqRel);
@@ -635,6 +645,7 @@ fn lower_priority() {
 
 /// Starts the app's cleanup: a pass shortly after launch, then daily, plus shrinking each
 /// iPhone capture a minute after it's made.
+#[cfg(target_os = "macos")]
 pub fn start() {
     if WORKER.get().is_some() {
         return;
@@ -649,6 +660,7 @@ pub fn start() {
 }
 
 /// Runs a pass soon, after the policy changed.
+#[cfg(target_os = "macos")]
 pub fn nudge() {
     if let Some(worker) = WORKER.get() {
         let _ = worker.send(Job::Pass);
@@ -662,6 +674,7 @@ pub fn after_phone_capture(bundle: &Path) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn worker(jobs: &flume::Receiver<Job>) {
     #[cfg(target_os = "macos")]
     lower_priority();
@@ -734,6 +747,7 @@ fn worker(jobs: &flume::Receiver<Job>) {
 }
 
 /// `Err` when the bundle is busy and should be retried.
+#[cfg(target_os = "macos")]
 fn shrink_now(dir: &Path) -> std::result::Result<(), ()> {
     let now = SystemTime::now();
     if recording()

@@ -187,11 +187,13 @@ pub fn copy_bundle_to_clipboard(_bundle_dir: &Path) -> Result<()> {
     bail!("Image and text clipboard handoff requires macOS")
 }
 
+#[cfg(target_os = "macos")]
 #[cfg(not(target_os = "macos"))]
 pub fn paste_bundle_image_and_text(_bundle_dir: &Path) -> Result<()> {
     bail!("Image and text paste handoff requires macOS")
 }
 
+#[cfg(target_os = "macos")]
 #[cfg(not(target_os = "macos"))]
 pub fn paste_bundle_at_target(_bundle_dir: &Path, _click_target: Option<[f32; 2]>) -> Result<()> {
     bail!("Image and text paste handoff requires macOS")
@@ -543,12 +545,14 @@ pub fn ensure_ingest_token() -> Result<String> {
 }
 
 /// Whether Mac captures of a dev site go straight to its session (`autoSend`, default on).
+#[cfg(target_os = "macos")]
 pub fn auto_send() -> bool {
     config().auto_send.unwrap_or(true)
 }
 
 /// Whether the menu offers video export (`videoExport`, default off). `scrawl export` works
 /// either way.
+#[cfg(target_os = "macos")]
 pub fn video_export() -> bool {
     config().video_export.unwrap_or(false)
 }
@@ -568,6 +572,7 @@ pub fn hex_model() -> Option<String> {
 
 /// Whether the native AppKit + Metal recording pill is enabled (`SCRAWL_NATIVE_PILL` or
 /// `nativePill` in `config.json`, default `true`).
+#[cfg(target_os = "macos")]
 pub fn native_pill() -> bool {
     if let Ok(val) = std::env::var("SCRAWL_NATIVE_PILL") {
         let s = val.trim().to_ascii_lowercase();
@@ -581,8 +586,8 @@ pub fn native_pill() -> bool {
     config().native_pill.unwrap_or(true)
 }
 
-#[cfg(target_os = "macos")]
 /// Configured capsule style (`pillStyle` in `config.json`, default `"black"`).
+#[cfg(target_os = "macos")]
 pub fn pill_style() -> crate::native::pill::PillStyle {
     config()
         .pill_style

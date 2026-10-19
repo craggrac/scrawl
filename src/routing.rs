@@ -14,6 +14,7 @@ pub mod look;
 pub mod smart;
 
 /// The experiment that routes Mac captures with [`smart`] (`handoff::experiment`).
+#[cfg(target_os = "macos")]
 pub const SMART_ROUTING: &str = "smartRouting";
 
 use std::path::{Path, PathBuf};
@@ -24,7 +25,9 @@ use anyhow::Result;
 
 use crate::capture::scrawl_log;
 use crate::handoff::{ApiGet, OpenCodeSession};
-use crate::model::{Destination, ScrawlBundle};
+use crate::model::Destination;
+#[cfg(any(target_os = "macos", test))]
+use crate::model::ScrawlBundle;
 use crate::web::Registration;
 
 /// The parts of an `http(s)` URL routing needs.
@@ -204,6 +207,7 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Option<std::pro
 
 /// The URL a capture was of: the browser in front when it finished, else the captured window's
 /// browser.
+#[cfg(target_os = "macos")]
 pub fn capture_url(
     front_bundle_id: Option<&str>,
     target_bundle_id: Option<&str>,
@@ -382,6 +386,7 @@ pub fn route(url: &str, hooks: &Hooks) -> std::result::Result<Destination, Strin
 }
 
 /// Decides where a capture that just finished goes; `None` (logged) keeps it on the clipboard.
+#[cfg(target_os = "macos")]
 pub fn route_capture(
     front_bundle_id: Option<&str>,
     target_bundle_id: Option<&str>,
@@ -407,6 +412,7 @@ pub fn route_capture(
 
 /// Smart routing's first half for a capture that just finished: the tab, terminal and sessions,
 /// or `None` when routing is off.
+#[cfg(target_os = "macos")]
 pub fn look_capture(
     front_bundle_id: Option<&str>,
     target_bundle_id: Option<&str>,
@@ -423,6 +429,7 @@ pub fn look_capture(
 
 /// Smart routing's second half, once the bundle is built: decides, saves the evidence beside
 /// the bundle (`RECORD`), and logs the outcome.
+#[cfg(target_os = "macos")]
 pub fn judge_capture(
     dir: &Path,
     bundle: &ScrawlBundle,
@@ -519,6 +526,7 @@ pub fn explain_bundle(bundle: &Path, url: Option<&str>) -> Result<String> {
 /// `scrawl route --explain` replays the same decision.
 pub const RECORD: &str = "routing.json";
 
+#[cfg(target_os = "macos")]
 pub fn write_record(
     dir: &Path,
     evidence: &smart::Evidence,
@@ -536,6 +544,7 @@ pub fn read_record(dir: &Path) -> Option<smart::Evidence> {
 }
 
 /// Writes `dest` into the bundle's `scrawl.json` and `summary.md`.
+#[cfg(any(target_os = "macos", test))]
 pub fn record_destination(dir: &Path, bundle: &mut ScrawlBundle, dest: Destination) -> Result<()> {
     bundle.destination = Some(dest);
     std::fs::write(dir.join("scrawl.json"), serde_json::to_vec_pretty(bundle)?)?;

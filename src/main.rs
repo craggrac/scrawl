@@ -5,6 +5,7 @@ mod autocrop;
 mod ax;
 mod autocrop_lab;
 mod capture;
+#[cfg(any(target_os = "macos", test))]
 mod command_line;
 mod delivery;
 mod export;
@@ -15,6 +16,7 @@ mod hex;
 mod hold;
 #[cfg(target_os = "macos")]
 mod icons;
+#[cfg(any(target_os = "macos", test))]
 mod inbox;
 mod keyframes;
 #[cfg(target_os = "macos")]
@@ -197,8 +199,8 @@ enum TuneCommand {
 
 #[derive(Subcommand)]
 enum Command {
-    #[cfg(target_os = "macos")]
     /// Launch the GPUI menu-bar and review application (the default when macOS opens Scrawl.app).
+    #[cfg(target_os = "macos")]
     App {
         /// Start a capture session immediately on launch.
         #[arg(long)]
@@ -256,10 +258,10 @@ enum Command {
     },
     /// List cabled iPhones and iPads that can be captured.
     Devices,
-    #[cfg(target_os = "macos")]
     /// Try a one-frame ScreenCaptureKit capture in this process and print the result as JSON,
     /// once or (with `--watch`) every second, to see whether a Screen Recording grant reaches a
     /// running process. Asks for Screen Recording if it was never decided.
+    #[cfg(target_os = "macos")]
     #[command(hide = true)]
     SckProbe {
         /// Keep trying for this many seconds without restarting.
@@ -290,17 +292,17 @@ enum Command {
         #[arg(long = "experiment", value_name = "NAME")]
         experiments: Vec<String>,
     },
-    #[cfg(target_os = "macos")]
     /// Motion lab: replay the capsule's states on a fixed timeline with nothing captured, for
     /// traces (`--trace`, motion-lint's format), screen recordings and tuning.
+    #[cfg(target_os = "macos")]
     #[command(hide = true)]
     Lab {
         #[command(subcommand)]
         command: LabCommand,
     },
-    #[cfg(target_os = "macos")]
     /// Tune the capsule's springs live: edits `~/.config/scrawl/tune.json`, which debug builds
     /// (the lab and the installed app) re-read within a quarter second.
+    #[cfg(target_os = "macos")]
     #[command(hide = true)]
     Tune {
         #[command(subcommand)]
@@ -477,8 +479,8 @@ enum Command {
         #[arg(long)]
         export: Option<PathBuf>,
     },
-    #[cfg(target_os = "macos")]
     /// Print the window list the Screen-mode window log would store, and what it costs.
+    #[cfg(target_os = "macos")]
     #[command(hide = true)]
     Windows {
         /// Repeat the snapshot this many times and report the average time.
@@ -519,8 +521,8 @@ enum Command {
         #[arg(long, value_name = "BUNDLE")]
         explain: Option<PathBuf>,
     },
-    #[cfg(target_os = "macos")]
     /// Open a `.scrawl` bundle in the native GPUI review window.
+    #[cfg(target_os = "macos")]
     Preview {
         /// Path to `.scrawl` bundle directory or `latest`. Generates a demo bundle if none exists.
         #[arg(default_value = "latest")]

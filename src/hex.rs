@@ -14,8 +14,12 @@
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", test))]
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicBool;
+#[cfg(any(target_os = "macos", test))]
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -233,6 +237,7 @@ pub struct Status {
 }
 
 impl Status {
+    #[cfg(any(target_os = "macos", test))]
     pub fn usable_models(&self) -> impl Iterator<Item = &Model> {
         self.models.iter().filter(|model| model.usable())
     }
@@ -372,16 +377,20 @@ pub fn status() -> Result<Status> {
     Client::connect()?.status()
 }
 
+#[cfg(target_os = "macos")]
 static CACHE: Mutex<Option<Option<Status>>> = Mutex::new(None);
+#[cfg(target_os = "macos")]
 static REFRESHING: AtomicBool = AtomicBool::new(false);
 
 /// The last known Hex status without touching the network, for the menu. `None` means Hex
 /// wasn't connected at the last check (or none has finished yet).
+#[cfg(target_os = "macos")]
 pub fn cached_status() -> Option<Status> {
     CACHE.lock().ok()?.clone()?
 }
 
 /// Re-checks Hex on a background thread (one at a time).
+#[cfg(target_os = "macos")]
 pub fn refresh_in_background() {
     if REFRESHING.swap(true, Ordering::AcqRel) {
         return;
@@ -402,6 +411,7 @@ pub fn refresh_in_background() {
 
 /// Keeps `cached_status` fresh while the app runs. A missing discovery file makes each check a
 /// single failed file read.
+#[cfg(target_os = "macos")]
 pub fn watch() {
     let _ = std::thread::Builder::new()
         .name("scrawl-hex-watch".into())

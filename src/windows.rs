@@ -20,14 +20,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::TargetFrame;
 
-#[cfg(target_os = "macos")]
 /// How often the worker wakes to sample the cursor and check its triggers.
+#[cfg(target_os = "macos")]
 const TICK: Duration = Duration::from_millis(66);
-#[cfg(target_os = "macos")]
 /// Snapshots while the cursor moves are at most this often (about 2 Hz).
-const MOVING_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(target_os = "macos")]
+const MOVING_INTERVAL: Duration = Duration::from_millis(500);
 /// A snapshot even when nothing seems to happen, to catch windows opening without input.
+#[cfg(target_os = "macos")]
 const IDLE_INTERVAL: Duration = Duration::from_millis(2_000);
 /// Cursor samples closer than this to the previous one (in capture points) are dropped.
 const CURSOR_MIN_MOVE_PT: f64 = 2.0;
@@ -124,8 +124,8 @@ fn round4(v: f64) -> f32 {
     ((v * 10_000.0).round() / 10_000.0) as f32
 }
 
-#[cfg(target_os = "macos")]
 /// One window as the window server reported it, in global points.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawWindow {
     pub id: u32,
@@ -137,8 +137,8 @@ pub struct RawWindow {
     pub alpha: f64,
 }
 
-#[cfg(target_os = "macos")]
 /// What the log needs to know about a window's app.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppMeta {
     pub bundle_id: Option<String>,
@@ -146,13 +146,13 @@ pub struct AppMeta {
     pub regular: bool,
 }
 
-#[cfg(target_os = "macos")]
 /// Keeps normal windows (plus regular apps' panels and menus), the menu bar and the Dock that
 /// overlap the capture, converts them to capture points and marks the frontmost app's first
 /// normal window.
 ///
 /// The Dock's own window covers the whole display, so it is replaced by `dock` (the strip the
 /// Dock reserves, in global points) or dropped when the Dock hides.
+#[cfg(target_os = "macos")]
 pub fn filter_windows(
     raw: &[RawWindow],
     frame: TargetFrame,
@@ -208,9 +208,9 @@ pub fn filter_windows(
     out
 }
 
-#[cfg(target_os = "macos")]
 /// Whether the topmost window under a global point (in `raw`, front to back) belongs to `own_pid`,
 /// looking through `passthrough` windows, which let clicks fall to whatever is below them.
+#[cfg(target_os = "macos")]
 pub fn owned_window_at(
     raw: &[RawWindow],
     x: f64,
@@ -227,7 +227,6 @@ pub fn owned_window_at(
         .is_some_and(|w| w.pid == own_pid)
 }
 
-#[cfg(target_os = "macos")]
 /// Reads the on-screen window list (front to back) from the window server.
 #[cfg(target_os = "macos")]
 pub fn raw_windows() -> Vec<RawWindow> {
@@ -315,10 +314,10 @@ fn app_meta_of(pid: i32) -> AppMeta {
     }
 }
 
-#[cfg(target_os = "macos")]
 /// The strip the Dock reserves on the display at `frame` (global top-left points), from the
 /// difference between the screen's frame and visible frame. `None` when the Dock hides or off
 /// the main thread (`NSScreen` is main-thread only).
+#[cfg(target_os = "macos")]
 pub fn dock_rect(frame: TargetFrame) -> Option<[f64; 4]> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSScreen;
@@ -357,8 +356,8 @@ pub fn dock_rect(frame: TargetFrame) -> Option<[f64; 4]> {
     }
 }
 
-#[cfg(target_os = "macos")]
 /// One timed snapshot of the windows overlapping `frame`.
+#[cfg(target_os = "macos")]
 pub fn snapshot(
     frame: TargetFrame,
     dock: Option<[f64; 4]>,
@@ -378,12 +377,12 @@ pub fn snapshot(
     })
 }
 
-#[cfg(target_os = "macos")]
 /// Background worker that logs windows and the cursor during a Screen-mode capture.
 ///
 /// Snapshots are taken at the start, right after `request` is raised (click, ink or laser
 /// start), when the frontmost app changes, at most every 500 ms while the cursor moves, every
 /// 2 s otherwise, and once more at the end. Cursor samples are taken at 15 Hz.
+#[cfg(target_os = "macos")]
 pub struct WindowLogger {
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<ActivityLog>>,

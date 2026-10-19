@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(target_os = "macos", test))]
 use crate::model::Destination;
 
 /// A send needs at least this score...
@@ -94,6 +95,7 @@ pub enum Source {
 
 impl Source {
     /// The `via` written into `scrawl.json`'s `destination`. The ladder's two keep their names.
+    #[cfg(any(target_os = "macos", test))]
     pub fn via(self) -> &'static str {
         match self {
             Self::Page => "sdk",
@@ -273,6 +275,7 @@ impl Basis {
 
 impl Scored {
     /// The reason that gave the most points (the first on a tie), which names how it was found.
+    #[cfg(any(target_os = "macos", test))]
     fn lead(&self) -> Option<&Reason> {
         self.reasons
             .iter()
@@ -715,6 +718,7 @@ pub fn words(text: &str) -> Vec<String> {
 // MARK: Effects
 
 /// The `destination` a send records, or `None` when nothing is sent.
+#[cfg(any(target_os = "macos", test))]
 pub fn destination(judgement: &Judgement, url: Option<&str>) -> Option<Destination> {
     let Decision::Send { to } = &judgement.decision else {
         return None;
