@@ -2103,7 +2103,8 @@ fn main() -> Result<()> {
             let page = autocrop_lab::export(&dir, &loaded)?;
             println!("{}", page.display());
             if open {
-                std::process::Command::new("open").arg(&page).status()?;
+                let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                std::process::Command::new(opener).arg(&page).status()?;
             }
             Ok(())
         }

@@ -135,7 +135,34 @@ pub fn copy_png_to_clipboard(png_bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
+pub fn copy_string_to_clipboard(content: &str) -> Result<()> {
+    wl_copy(&[], content.as_bytes())
+}
+
+/// `wl-copy` reads stdin, then forks to serve the selection, so it returns at once. Its
+/// stdout/stderr must not be our pipes, or the forked server would hold them open.
+#[cfg(target_os = "linux")]
+fn wl_copy(args: &[&str], bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("wl-copy")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Could not run wl-copy (install wl-clipboard)")?;
+    child
+        .stdin
+        .take()
+        .context("No wl-copy stdin")?
+        .write_all(bytes)?;
+    ensure!(child.wait()?.success(), "wl-copy failed");
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn copy_bundle_to_clipboard(bundle_dir: &Path) -> Result<()> {
     let (directory, bundle) = load_bundle(bundle_dir)?;
     let summary = crate::sketch::summary_markdown(&bundle, &directory);
@@ -183,7 +210,7 @@ pub fn paste_bundle_image_and_text(bundle_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn copy_bundle_to_clipboard(_bundle_dir: &Path) -> Result<()> {
     bail!("Image and text clipboard handoff requires macOS")
 }
