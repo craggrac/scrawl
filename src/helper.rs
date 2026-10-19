@@ -96,6 +96,7 @@ pub struct PhoneDevice {
     pub height: u32,
 }
 
+#[cfg(target_os = "macos")]
 /// What macOS has granted Scrawl, from a fresh helper process (a long-running one can miss a
 /// Screen Recording grant).
 pub fn permissions()

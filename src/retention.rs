@@ -625,6 +625,7 @@ enum Job {
 
 static WORKER: std::sync::OnceLock<flume::Sender<Job>> = std::sync::OnceLock::new();
 
+#[cfg(target_os = "macos")]
 fn lower_priority() {
     // SAFETY: only changes the calling thread's scheduling class.
     unsafe {
@@ -662,6 +663,7 @@ pub fn after_phone_capture(bundle: &Path) {
 }
 
 fn worker(jobs: &flume::Receiver<Job>) {
+    #[cfg(target_os = "macos")]
     lower_priority();
     let captures = crate::handoff::default_captures_dir();
     let mut next_pass = Instant::now() + Duration::from_secs(90);

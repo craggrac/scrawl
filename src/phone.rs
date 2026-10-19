@@ -3,17 +3,26 @@
 //! from the phone's own video, never from a screenshot of the mirror window.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "macos")]
+use std::io::{BufRead, BufReader};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::process::{Child, ChildStdin, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "macos")]
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
+#[cfg(target_os = "macos")]
+use anyhow::bail;
 use serde::Deserialize;
 
-use crate::capture::{LiveOverlayEvent, SharedCaptureTelemetry, scrawl_log};
+use crate::capture::scrawl_log;
+#[cfg(target_os = "macos")]
+use crate::capture::{LiveOverlayEvent, SharedCaptureTelemetry};
 use crate::delivery::{Delivery, Outcome};
 use crate::helper::{self, FrameTimes, PhoneDevice};
 use crate::model::{
@@ -28,6 +37,7 @@ pub const PHONE_FRAME_EDGE: u32 = 1600;
 const CANDIDATE_EDGE: u32 = 320;
 const MAX_CANDIDATES: u64 = 480;
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct MirrorState {
     device: Option<PhoneDevice>,
@@ -40,6 +50,7 @@ struct MirrorState {
     error: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
 /// A running mirror: the helper's floating window shows the phone, records its native video
 /// with the Mac's microphone into the bundle, and reports where the picture is on screen so
 /// pointer and pen input normalize into phone-screen coordinates.
@@ -64,6 +75,7 @@ pub struct PhoneRecording {
     pub flags: Vec<u64>,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Deserialize)]
 #[serde(tag = "event", rename_all = "lowercase")]
 enum MirrorEvent {
@@ -95,6 +107,7 @@ enum MirrorEvent {
     },
 }
 
+#[cfg(target_os = "macos")]
 impl PhoneSession {
     /// Opens the live iPhone mirror window in preview mode without recording to disk yet.
     pub fn start_preview(
@@ -400,6 +413,7 @@ impl PhoneSession {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for PhoneSession {
     fn drop(&mut self) {
         self.cancel_async();
@@ -1235,6 +1249,7 @@ pub fn format_setup_link(
     Ok(format!("{scheme}://scrawl?{}", query.join("&")))
 }
 
+#[cfg(target_os = "macos")]
 /// Starts Scrawl's background ScrawlKit ingest inside the GUI app: an HTTP server on
 /// `0.0.0.0:47777` the phone uploads to, and a cabled-iPhone `devicectl` watcher for when the
 /// network can't reach the Mac. Each recording becomes a `.scrawl` bundle, lands on the clipboard

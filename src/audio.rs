@@ -25,6 +25,7 @@ pub struct AudioRecorder {
 
 impl AudioRecorder {
     pub fn start() -> Result<Self> {
+        #[cfg(target_os = "macos")]
         let started = std::time::Instant::now();
         let samples = Arc::new(Mutex::new(Vec::new()));
         let error = Arc::new(Mutex::new(None));
@@ -38,6 +39,7 @@ impl AudioRecorder {
                     Self::open_stream(worker_samples, worker_error).inspect_err(|error| {
                         crate::capture::scrawl_log(format!("Microphone startup failed: {error:#}"));
                     })?;
+                #[cfg(target_os = "macos")]
                 crate::ui::start_metric("audio_ready_ms", started);
                 // Stream never crosses threads. Disconnect also stops abandoned recorders.
                 let _ = stop_receiver.recv();

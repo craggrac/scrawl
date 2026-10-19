@@ -1,6 +1,7 @@
 mod agent_context;
 mod audio;
 mod autocrop;
+#[cfg(target_os = "macos")]
 mod ax;
 mod autocrop_lab;
 mod capture;
@@ -10,26 +11,35 @@ mod export;
 mod handoff;
 mod helper;
 mod hex;
+#[cfg(target_os = "macos")]
 mod hold;
+#[cfg(target_os = "macos")]
 mod icons;
 mod inbox;
 mod keyframes;
+#[cfg(target_os = "macos")]
 mod laser_overlay;
 mod live_transcribe;
 mod mic;
 mod model;
+#[cfg(target_os = "macos")]
 mod native;
+#[cfg(target_os = "macos")]
 mod onboarding;
 mod page;
 mod phone;
 mod render;
 mod retention;
 mod routing;
+#[cfg(target_os = "macos")]
 mod screens;
+#[cfg(target_os = "macos")]
 mod settings;
 mod sketch;
+#[cfg(target_os = "macos")]
 mod sparkle;
 mod transcribe;
+#[cfg(target_os = "macos")]
 mod ui;
 mod web;
 mod windows;
@@ -41,8 +51,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 
-use crate::capture::{ScreenCaptureSession, discover_target, write_bundle_artifacts};
-use crate::audio::{AudioRecorder, RecordedAudio};
+use crate::capture::write_bundle_artifacts;
+#[cfg(target_os = "macos")]
+use crate::capture::{ScreenCaptureSession, discover_target};
+#[cfg(target_os = "macos")]
+use crate::audio::AudioRecorder;
+use crate::audio::RecordedAudio;
 use crate::keyframes::select_keyframes;
 use crate::model::{
     CaptureMode, DeviceInfo, InteractionEvent, Mark, RgbaFrame, SCALE, ScrawlBundle, Shape,
@@ -144,6 +158,7 @@ enum HexCommand {
     Status,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Subcommand)]
 enum LabCommand {
     /// Play a capsule scene: tap-then-area, tap-then-window, tap-then-screen, hold-switcher, finish.
@@ -165,6 +180,7 @@ enum LabCommand {
     },
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Subcommand)]
 enum TuneCommand {
     /// Every key with its live and default value, and the presets (default).
@@ -181,6 +197,7 @@ enum TuneCommand {
 
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(target_os = "macos")]
     /// Launch the GPUI menu-bar and review application (the default when macOS opens Scrawl.app).
     App {
         /// Start a capture session immediately on launch.
@@ -239,6 +256,7 @@ enum Command {
     },
     /// List cabled iPhones and iPads that can be captured.
     Devices,
+    #[cfg(target_os = "macos")]
     /// Try a one-frame ScreenCaptureKit capture in this process and print the result as JSON,
     /// once or (with `--watch`) every second, to see whether a Screen Recording grant reaches a
     /// running process. Asks for Screen Recording if it was never decided.
@@ -272,6 +290,7 @@ enum Command {
         #[arg(long = "experiment", value_name = "NAME")]
         experiments: Vec<String>,
     },
+    #[cfg(target_os = "macos")]
     /// Motion lab: replay the capsule's states on a fixed timeline with nothing captured, for
     /// traces (`--trace`, motion-lint's format), screen recordings and tuning.
     #[command(hide = true)]
@@ -279,6 +298,7 @@ enum Command {
         #[command(subcommand)]
         command: LabCommand,
     },
+    #[cfg(target_os = "macos")]
     /// Tune the capsule's springs live: edits `~/.config/scrawl/tune.json`, which debug builds
     /// (the lab and the installed app) re-read within a quarter second.
     #[command(hide = true)]
@@ -457,6 +477,7 @@ enum Command {
         #[arg(long)]
         export: Option<PathBuf>,
     },
+    #[cfg(target_os = "macos")]
     /// Print the window list the Screen-mode window log would store, and what it costs.
     #[command(hide = true)]
     Windows {
@@ -498,6 +519,7 @@ enum Command {
         #[arg(long, value_name = "BUNDLE")]
         explain: Option<PathBuf>,
     },
+    #[cfg(target_os = "macos")]
     /// Open a `.scrawl` bundle in the native GPUI review window.
     Preview {
         /// Path to `.scrawl` bundle directory or `latest`. Generates a demo bundle if none exists.
@@ -1403,6 +1425,7 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "macos")]
     if std::env::var_os("SCRAWL_BENCH_START").is_some() {
         ui::run_start_benchmark();
         return Ok(());
@@ -1412,16 +1435,25 @@ fn main() -> Result<()> {
         Some(command) => command,
         // `scrawl` typed in a terminal (on PATH through Settings › Agents or Homebrew) would
         // start a second menu-bar app. macOS opens the app with stdin on /dev/null.
+        #[cfg(target_os = "macos")]
         None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
             <Cli as clap::CommandFactory>::command().print_help()?;
             return Ok(());
         }
+        #[cfg(target_os = "macos")]
         None => Command::App {
             record: false,
             iphone: false,
         },
+        #[cfg(not(target_os = "macos"))]
+        None => {
+            use clap::CommandFactory;
+            Cli::command().print_help()?;
+            return Ok(());
+        }
     };
     match command {
+        #[cfg(target_os = "macos")]
         Command::App { record, iphone } => {
             ui::run_app(None, record, iphone, None);
             Ok(())
@@ -1434,6 +1466,7 @@ fn main() -> Result<()> {
             print!("{summary}");
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::Record {
             window,
             iphone: true,
@@ -1473,6 +1506,7 @@ fn main() -> Result<()> {
             print!("{summary}");
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::Record {
             window,
             iphone: false,
@@ -1518,6 +1552,8 @@ fn main() -> Result<()> {
             print!("{summary}");
             Ok(())
         }
+        #[cfg(not(target_os = "macos"))]
+        Command::Record { .. } => anyhow::bail!("Recording on Linux arrives with `scrawl toggle`"),
         Command::Import {
             recording,
             timeline,
@@ -1803,6 +1839,7 @@ fn main() -> Result<()> {
             print!("{summary}");
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::Lab {
             command:
                 LabCommand::Pill {
@@ -1829,6 +1866,7 @@ fn main() -> Result<()> {
             });
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::Tune { command } => ui::tune_command(match command.unwrap_or(TuneCommand::List) {
             TuneCommand::List => ui::TuneAction::List,
             TuneCommand::Set { key, value } => ui::TuneAction::Set(key, value),
@@ -1876,6 +1914,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::SckProbe { watch } => {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(watch.unwrap_or(0));
             loop {
@@ -2139,6 +2178,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::Windows { repeat } => {
             let target = discover_target(None);
             let dock = windows::dock_rect(target.frame);
@@ -2211,6 +2251,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::Preview {
             bundle,
             capture_screenshot,

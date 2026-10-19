@@ -581,6 +581,7 @@ pub fn native_pill() -> bool {
     config().native_pill.unwrap_or(true)
 }
 
+#[cfg(target_os = "macos")]
 /// Configured capsule style (`pillStyle` in `config.json`, default `"black"`).
 pub fn pill_style() -> crate::native::pill::PillStyle {
     config()

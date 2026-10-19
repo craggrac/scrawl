@@ -6,9 +6,13 @@
 //! list changes), cursor samples are deduped by movement, and window titles stay in
 //! `scrawl.json`: they never go into `summary.md` or the clipboard.
 
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -16,10 +20,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::TargetFrame;
 
+#[cfg(target_os = "macos")]
 /// How often the worker wakes to sample the cursor and check its triggers.
 const TICK: Duration = Duration::from_millis(66);
+#[cfg(target_os = "macos")]
 /// Snapshots while the cursor moves are at most this often (about 2 Hz).
 const MOVING_INTERVAL: Duration = Duration::from_millis(500);
+#[cfg(target_os = "macos")]
 /// A snapshot even when nothing seems to happen, to catch windows opening without input.
 const IDLE_INTERVAL: Duration = Duration::from_millis(2_000);
 /// Cursor samples closer than this to the previous one (in capture points) are dropped.
@@ -117,6 +124,7 @@ fn round4(v: f64) -> f32 {
     ((v * 10_000.0).round() / 10_000.0) as f32
 }
 
+#[cfg(target_os = "macos")]
 /// One window as the window server reported it, in global points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawWindow {
@@ -129,6 +137,7 @@ pub struct RawWindow {
     pub alpha: f64,
 }
 
+#[cfg(target_os = "macos")]
 /// What the log needs to know about a window's app.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppMeta {
@@ -137,6 +146,7 @@ pub struct AppMeta {
     pub regular: bool,
 }
 
+#[cfg(target_os = "macos")]
 /// Keeps normal windows (plus regular apps' panels and menus), the menu bar and the Dock that
 /// overlap the capture, converts them to capture points and marks the frontmost app's first
 /// normal window.
@@ -198,6 +208,7 @@ pub fn filter_windows(
     out
 }
 
+#[cfg(target_os = "macos")]
 /// Whether the topmost window under a global point (in `raw`, front to back) belongs to `own_pid`,
 /// looking through `passthrough` windows, which let clicks fall to whatever is below them.
 pub fn owned_window_at(
@@ -216,6 +227,7 @@ pub fn owned_window_at(
         .is_some_and(|w| w.pid == own_pid)
 }
 
+#[cfg(target_os = "macos")]
 /// Reads the on-screen window list (front to back) from the window server.
 #[cfg(target_os = "macos")]
 pub fn raw_windows() -> Vec<RawWindow> {
@@ -288,6 +300,7 @@ pub fn raw_windows() -> Vec<RawWindow> {
     out
 }
 
+#[cfg(target_os = "macos")]
 fn app_meta_of(pid: i32) -> AppMeta {
     use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
     match NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
@@ -302,6 +315,7 @@ fn app_meta_of(pid: i32) -> AppMeta {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// The strip the Dock reserves on the display at `frame` (global top-left points), from the
 /// difference between the screen's frame and visible frame. `None` when the Dock hides or off
 /// the main thread (`NSScreen` is main-thread only).
@@ -343,6 +357,7 @@ pub fn dock_rect(frame: TargetFrame) -> Option<[f64; 4]> {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// One timed snapshot of the windows overlapping `frame`.
 pub fn snapshot(
     frame: TargetFrame,
@@ -363,6 +378,7 @@ pub fn snapshot(
     })
 }
 
+#[cfg(target_os = "macos")]
 /// Background worker that logs windows and the cursor during a Screen-mode capture.
 ///
 /// Snapshots are taken at the start, right after `request` is raised (click, ink or laser
@@ -373,6 +389,7 @@ pub struct WindowLogger {
     worker: Option<JoinHandle<ActivityLog>>,
 }
 
+#[cfg(target_os = "macos")]
 impl WindowLogger {
     /// Call on the main thread, so the Dock's strip can be read from `NSScreen`.
     pub fn start(frame: TargetFrame, started_at: Instant, request: Arc<AtomicBool>) -> Self {
@@ -409,6 +426,7 @@ impl WindowLogger {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for WindowLogger {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
@@ -418,6 +436,7 @@ impl Drop for WindowLogger {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn run(
     frame: TargetFrame,
     dock: Option<[f64; 4]>,
@@ -493,6 +512,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn clicks_on_scrawl_windows_are_found_through_the_ink_overlay() {
         let window = |id, pid, bounds| RawWindow {
@@ -546,6 +566,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn logger_snapshots_at_start_and_right_after_a_request() {
         let request = Arc::new(AtomicBool::new(false));
@@ -577,6 +598,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn filtering_keeps_overlapping_windows_menu_bar_and_dock_in_capture_points() {
         let capture = TargetFrame {
