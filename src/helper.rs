@@ -9,10 +9,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
+#[cfg(not(target_os = "linux"))]
+use anyhow::ensure;
 use serde::Deserialize;
 
-use crate::model::{RgbaFrame, TranscriptData, TranscriptSegment, WordTiming};
+#[cfg(not(target_os = "linux"))]
+use crate::model::RgbaFrame;
+use crate::model::{TranscriptData, TranscriptSegment, WordTiming};
+
+#[cfg(target_os = "linux")]
+pub use crate::linux::media::{export_audio, frames, probe, shrink};
 
 pub fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("SCRAWL_HELPER") {
@@ -149,12 +156,14 @@ pub struct Probe {
     pub fps: f64,
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn probe(movie: &Path) -> Result<Probe> {
     run(&[os("probe"), movie.as_os_str()], Duration::from_secs(30))
 }
 
 /// Re-encodes `movie` into `out` as HEVC with its long edge at most `max_edge`, audio copied and
 /// every sample at its original time. Runs at utility priority; minutes of video take seconds.
+#[cfg(not(target_os = "linux"))]
 pub fn shrink(movie: &Path, out: &Path, max_edge: u32) -> Result<crate::retention::Shrunk> {
     let edge = max_edge.to_string();
     let helper = path()?;
@@ -175,6 +184,7 @@ pub fn shrink(movie: &Path, out: &Path, max_edge: u32) -> Result<crate::retentio
 }
 
 /// Mixes a movie's audio to 16 kHz mono WAV, aligned to the movie's start.
+#[cfg(not(target_os = "linux"))]
 pub fn export_audio(movie: &Path, wav: &Path) -> Result<()> {
     let _: serde_json::Value = run(
         &[os("audio"), movie.as_os_str(), wav.as_os_str()],
@@ -184,6 +194,7 @@ pub fn export_audio(movie: &Path, wav: &Path) -> Result<()> {
 }
 
 #[derive(Deserialize)]
+#[cfg(not(target_os = "linux"))]
 struct FrameFile {
     t: u64,
     actual: u64,
@@ -200,6 +211,7 @@ pub enum FrameTimes<'a> {
 }
 
 /// Decodes movie frames into memory; `max_edge` 0 keeps native size.
+#[cfg(not(target_os = "linux"))]
 pub fn frames(movie: &Path, times: FrameTimes, max_edge: u32) -> Result<Vec<RgbaFrame>> {
     let dir = std::env::temp_dir().join(format!("scrawl-frames-{}", crate::make_bundle_id()));
     let (flag, value, sampled) = match times {

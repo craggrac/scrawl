@@ -18,6 +18,8 @@ mod hold;
 mod icons;
 #[cfg(any(target_os = "macos", test))]
 mod inbox;
+#[cfg(target_os = "linux")]
+mod linux;
 mod keyframes;
 #[cfg(target_os = "macos")]
 mod laser_overlay;
