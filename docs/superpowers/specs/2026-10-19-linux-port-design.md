@@ -4,11 +4,11 @@
 
 Rodar o Scrawl no Linux com Hyprland: gravar tela + voz por um atalho, transcrever com tempo por palavra
 e gerar o mesmo bundle `.scrawl` (`contact-sheet.png`, `frames/`, `summary.md`, `scrawl.json`,
-`recording.mp4`, `audio.wav`), entregue na área de transferência e no OpenCode.
+`recording.mp4`, `audio.wav`), entregue na área de transferência (OpenCode por `scrawl send`).
 
-O Mac continua compilando e funcionando igual. Toda mudança no Linux fica atrás de
-`#[cfg(target_os = "linux")]` ou num módulo novo; código compartilhado só muda quando a mudança vale para os
-dois sistemas (ex.: mover `write_bundle_artifacts` para fora de `capture.rs`).
+O Mac continua compilando e funcionando igual. Código do Linux fica atrás de
+`#[cfg(target_os = "linux")]` ou em `src/linux/`; código compartilhado só muda quando a mudança vale para os
+dois sistemas (ex.: separar a parte portável de `capture.rs`).
 
 ## Abordagem
 
@@ -19,120 +19,130 @@ macOS:
 |---|---|---|
 | ScreenCaptureKit (`capture.rs`) | `wf-recorder` (wlr-screencopy, suportado pelo Hyprland) | `wf-recorder` |
 | `scrawl-helper` probe/frames/audio/shrink | `ffprobe`/`ffmpeg` | `ffmpeg` |
-| SpeechAnalyzer | `whisper-cli` (whisper.cpp) com tempo por palavra | `whisper.cpp`, um modelo ggml |
+| SpeechAnalyzer | Parakeet TDT 0.6b v3 via `sherpa-onnx-ws` (o do OpenWhispr), tempo por token | OpenWhispr instalado (binário + modelo) |
 | CGWindowList (`windows.rs`) | `hyprctl -j clients`, `activewindow`, `cursorpos`, `monitors` | Hyprland |
 | NSPasteboard (`handoff.rs`) | `wl-copy` | `wl-clipboard` |
 | hotkey Carbon | `bind` do Hyprland → `scrawl toggle` | — |
 
-Rejeitada: tudo em processo (pipewire-rs + portal + whisper-rs). Mais portável entre desktops, mas build
-pesado (whisper com CUDA) e muito mais código. Pode substituir um backend por vez no futuro, porque cada
-backend fica atrás das mesmas funções que o Mac usa.
+Rejeitada: tudo em processo (pipewire-rs + portal + whisper-rs/sherpa-rs). Mais portável entre desktops,
+mas build pesado e muito mais código. Pode substituir um backend por vez no futuro, porque cada backend
+fica atrás das mesmas funções que o Mac usa.
+
+Transcrição verificada em 2026-10-19: `sherpa-onnx-ws-linux-x64 --model-type=nemo_transducer` com
+`parakeet-tdt-0.6b-v3` devolve `text`, `tokens`, `timestamps` e `durations` (segundos por token; token que
+começa com espaço abre palavra nova), em português correto.
 
 ## Fora de escopo
 
-iPhone (`phone.rs` ao vivo, `mirror`), ScrawlKit ao vivo, Sparkle, onboarding/permissões (TCC), pill, GPUI,
-overlay de tinta, Settings, Hex, `export` em vídeo com zoom (fica para depois; `export` sem helper falha com
-erro claro), colar automático (⌘V sintético). Fase 3 (cliques/teclas via `/dev/input`) e fase 4 (tinta ⇧ na
-tela, pill, GPUI Linux) ganham specs próprias.
+iPhone ao vivo (`PhoneSession`, `mirror`, servidor de ingest), Sparkle, onboarding/permissões (TCC), pill,
+GPUI, overlay de tinta, Settings, Hex no Linux, `export` em vídeo (usa o helper Swift; no Linux falha com
+erro claro), colar automático (⌘V sintético), transcrição ao vivo. Fase 3 (cliques/teclas via
+`/dev/input`) e fase 4 (tinta ⇧ na tela, pill, GPUI Linux) ganham specs próprias.
 
 ## Fase 1: compilar no Linux e ler bundles
 
 Resultado: `cargo build` passa no Linux; `demo`, `inspect`, `frames`, `zoom`, `send`, `import`, `reprocess`,
-`clean`, `pin`, `route`, `serve`, `skill` funcionam. Subcomandos só do Mac (`app`, `lab`, `tune`, `devices`,
-`sck-probe`, `windows`, `preview`, `record --iphone`, `mic watch`, `hex`) somem do `clap` no Linux via
-`#[cfg]`. Os que só dependem de arquivos (`capture-sim`, `autocrop`, `autocrop-eval`, `fixture`) ficam.
+`clean`, `pin`, `route`, `serve`, `skill`, `capture-sim`, `autocrop`, `autocrop-eval`, `fixture` funcionam.
+Subcomandos só do Mac (`app`, `lab`, `tune`, `devices`, `sck-probe`, `windows`, `preview`, `mic watch`,
+`hex`, `link`) somem do `clap` no Linux via `#[cfg]`; `record --iphone` dá erro no Linux.
 
-1. **Gating de módulos.** Em `main.rs`, os módulos que importam APIs do Mac ficam sob
-   `#[cfg(target_os = "macos")]`: `ui`, `laser_overlay`, `native`, `sparkle`, `ax`, `settings`,
-   `onboarding`, `screens`, `icons` (GPUI), `hold` (usa `ui::SelectionMode`) e `capture` (SCK/Carbon).
-   O que o resto do código usa de `capture` sai para o módulo compartilhado `bundle_io.rs`: `scrawl_log` (usado por
-   `inbox`, `retention`), `ScreenRecording`, `CANDIDATE_EDGE`, `CANDIDATE_BUDGET_BYTES`,
-   `FRAME_SAMPLE_INTERVAL`, `CandidateBuffer`, `capture_size` (usados por `autocrop_lab`, que continua
-   compilando no Linux) e as funções puras de gesto (`is_pin_click`, `ink_before`, `is_real_ink`).
-   Critério: só move o que o Linux precisa para compilar.
-2. **Escrita do bundle.** `write_bundle_artifacts` (`capture.rs:3597`) e `ScreenRecording` vão para o mesmo
-   `bundle_io.rs`. `finalize_capture_bundle` (`main.rs:785`) fica igual.
-3. **Helper → ffmpeg.** `helper.rs` mantém a mesma API pública. No Linux, `probe`, `frames`
-   (`FrameTimes::At` e `Every`, com `max_edge`), `export_audio` e `shrink` chamam `ffprobe`/`ffmpeg`
-   (frames saem em `rawvideo rgba` por stdout, sem arquivos temporários). `permissions`, `devices`, `qr` e
-   `transcribe` retornam erro "não suportado no Linux". Implementação em `src/helper_ffmpeg.rs`, escolhida
-   por `cfg` dentro de `helper.rs`.
-4. **Caminhos.** `default_captures_dir` usa `dirs::data_dir()/scrawl/captures` no Linux
-   (`~/.local/share/scrawl/captures`); log em `dirs::state_dir()/scrawl`; exports em
-   `dirs::video_dir()/Scrawl`. `SCRAWL_CAPTURES_DIR` continua valendo. No Mac nada muda.
-5. **Texto no contact sheet.** `render.rs` tem fallback de largura chutada fora do Mac. No Linux:
-   crate `ab_glyph` e a fonte do sistema achada por `fc-match -f '%{file}' 'sans:bold'` / `'sans'` (cache
-   em `OnceLock`). Sem fonte achada, mantém o fallback atual.
-6. **Área de transferência.** Stubs de `handoff.rs:185-195` passam a usar `wl-copy` (texto e
-   `--type image/png`). Sem `wl-copy`, loga e segue.
-7. **Navegador/`open`.** `routing.rs:169` (`osascript`) retorna nada no Linux; `open` vira `xdg-open`.
+1. **Gating de módulos.** Em `main.rs`, `ui`, `laser_overlay`, `native`, `sparkle`, `ax`, `settings`,
+   `onboarding`, `screens`, `icons` e `hold` ficam sob `#[cfg(target_os = "macos")]`.
+2. **`capture` dividido.** `src/capture.rs` vira `src/capture/mod.rs` com só a parte portável
+   (`scrawl_log`, `FRAME_SAMPLE_INTERVAL`, `CANDIDATE_EDGE`, `CANDIDATE_BUDGET_BYTES`, `CandidateBuffer`,
+   `ScreenRecording`, `capture_size`, `write_bundle_artifacts`) e `src/capture/mac.rs` com o resto,
+   declarado `#[cfg(target_os = "macos")] mod mac; pub use mac::*;`. Assim todo `crate::capture::scrawl_log`
+   existente continua valendo.
+3. **`windows` dividido do mesmo jeito.** Tipos (`WindowSnapshot`, `WindowEntry`, `CursorSample`,
+   `ActivityLog` e métodos) ficam portáveis; `raw_windows`, `snapshot`, `dock_rect`, `filter_windows`,
+   `owned_window_at` e o `WindowLogger` do Mac ficam sob `cfg(macos)`.
+4. **Outros usos do Mac.** `phone.rs`: `PhoneSession` e o servidor de ingest (usam `SharedCaptureTelemetry`
+   e `LiveOverlayEvent`) ficam sob `cfg(macos)`; `import`, `build_movie_bundle`, `resolve_import`,
+   `finalize_live_capture` ficam portáveis. `audio.rs`: a chamada `crate::ui::start_metric` fica sob
+   `cfg(macos)`. `helper::permissions` fica sob `cfg(macos)`. `handoff::pill_style` fica sob `cfg(macos)`.
+5. **Helper → ffmpeg.** `helper.rs` mantém a mesma API pública. No Linux, `probe`, `frames`
+   (`FrameTimes::At` e `Every`, com `max_edge`), `export_audio` e `shrink` chamam `ffprobe`/`ffmpeg` (frames
+   saem em `rawvideo rgba` pelo stdout). `devices` e `qr` retornam erro "não suportado no Linux";
+   `transcribe` vai para o Parakeet (fase 2). Implementação em `src/linux/media.rs`, escolhida por `cfg`
+   dentro de `helper.rs`.
+6. **Caminhos.** Capturas em `dirs::data_dir()/scrawl/captures` (no Mac é o mesmo
+   `~/Library/Application Support/scrawl/captures` de hoje; no Linux `~/.local/share/scrawl/captures`); log
+   no Linux em `dirs::state_dir()/scrawl/scrawl.log`. `SCRAWL_CAPTURES_DIR` continua valendo.
+7. **Texto no contact sheet.** Fora do Mac, `render.rs` usa largura chutada e glifos 5×7. No Linux: crate
+   `ab_glyph` com a fonte do sistema achada por `fc-match -f '%{file}' 'sans:bold'` / `'sans'` (cache em
+   `OnceLock`). Sem fonte, mantém o fallback atual.
+8. **Área de transferência.** Os stubs de `handoff.rs:185-195` ganham versão Linux com `wl-copy`:
+   `copy_bundle_to_clipboard` copia o `summary.md` como texto. Colar automático continua dando erro.
+9. **`open`.** `autocrop --open` usa `xdg-open` no Linux. `routing::browser_tab_url` (`osascript`) já falha
+   sem quebrar quando o binário não existe; fica como está.
 
 ## Fase 2: gravar
 
-Resultado: `bind = ALT SHIFT, S, exec, scrawl toggle` no `hyprland.conf` inicia e para uma gravação;
-ao parar, o bundle é montado, transcrito, copiado (`wl-copy`) e entregue ao OpenCode pelo roteamento já
-existente; `notify-send` avisa início, fim e erro.
+Resultado: `bind = ALT SHIFT, S, exec, scrawl toggle` no `hyprland.conf` inicia e para uma gravação; ao
+parar, o bundle é montado e transcrito, o resumo vai para a área de transferência e `notify-send` avisa
+início, fim e erro. Entrega automática ao OpenCode fica fora: o roteamento do Mac decide por pistas que não
+existem aqui (aba do navegador via AppleScript, janela do terminal) e mandar para a sessão errada é pior
+que não mandar; `scrawl send latest [--session …]` continua funcionando à mão. Roteamento no Linux ganha
+spec própria.
 
-### Componentes (todos em `src/linux/`)
+### Componentes (em `src/linux/`)
 
-- **`record.rs` — sessão de tela.** `ScreenSession::start(target, video_path)` lança
-  `wf-recorder -o <monitor> -f recording.mp4 -c h264_nvenc` (cai para `libx264 -preset veryfast` se o
-  encoder falhar no primeiro segundo), ou `-g "<x,y wxh>"` para janela. `stop()` manda SIGINT, espera
-  sair, e devolve `ScreenRecording`: `video`, `duration_ms` pelo `ffprobe`, `video_offset_ms` = atraso
-  medido entre o start e o primeiro frame (aprox. pelo tempo até o arquivo ganhar bytes), e `frames` =
-  frames candidatos tirados do vídeo com `helper::frames(FrameTimes::Every(500ms), CANDIDATE_EDGE)`.
-  O seletor de keyframes não muda: ele já trabalha sobre `ScreenRecording.frames`.
-- **`hypr.rs` — janelas e cursor.** `WindowLogger` com a mesma interface do Mac
-  (`start(frame, started_at, request)`, `stop() -> ActivityLog`): a cada 250 ms lê
-  `hyprctl -j clients` + `activewindow` (vira `WindowSnapshot`/`WindowEntry`, deduplicado por
-  `push_windows`) e `hyprctl -j cursorpos` (vira `CursorSample` por `push_cursor`).
-  `discover_target(window)` usa `hyprctl -j monitors` (monitor focado) ou casa `--window` com título/classe
-  em `clients`. Coordenadas: lógicas do Hyprland; escala do monitor vem de `monitors`.
-- **`whisper.rs` — transcrição.** Novo `Engine::Whisper` em `transcribe.rs`, padrão no Linux. Roda
-  `whisper-cli -m <modelo> -l auto -oj -ml 1 -sow -of <tmp> <audio.wav>` (wav já é gravado pelo `audio.rs`;
-  reamostra para 16 kHz mono com `ffmpeg` se preciso) e converte cada segmento de uma palavra em
-  `WordTiming { t0, t1, text }`, `estimated: false`. Modelo: `SCRAWL_WHISPER_MODEL`, senão
-  `"whisper_model"` em `~/.config/scrawl/config.json`, senão
-  `~/.local/share/scrawl/models/ggml-small.bin`. Binário: `whisper-cli`, senão `whisper-cpp`. Sem binário ou
-  modelo: bundle sai sem transcrição e o log/notificação diz o que falta (mesmo comportamento de hoje sem
-  áudio).
+- **`record.rs` — sessão de tela.** `ScreenSession::start(&target, &video, started_at) -> Result<Self>`
+  lança `wf-recorder -o <monitor> -c h264_nvenc -f <video>` (sem NVENC: `-c libx264`)
+  ou `-g "x,y wxh"` para janela. `stop()` manda SIGINT, espera sair e devolve `ScreenRecording`: `video`,
+  `duration_ms` pelo `ffprobe`, `video_offset_ms` = ms entre o start e o primeiro byte no arquivo, `frames` =
+  candidatos tirados do vídeo com `helper::frames(FrameTimes::Every(FRAME_SAMPLE_INTERVAL), CANDIDATE_EDGE)`
+  com o tempo somado a `video_offset_ms`. O seletor de keyframes não muda.
+- **`hypr.rs` — janelas, cursor e alvo.** `WindowLogger` com a interface do Mac (`start(frame, started_at,
+  request)`, `stop() -> ActivityLog`): a cada 100 ms lê `hyprctl -j cursorpos` (vira `CursorSample` por
+  `push_cursor`); a cada 1 s, ou quando a janela ativa muda, lê `hyprctl -j clients` + `activewindow` (vira
+  `WindowEntry`s por `push_windows`). `discover_target(window)` usa `hyprctl -j monitors` (monitor focado)
+  ou casa `--window` com título/classe em `clients`. Coordenadas lógicas do Hyprland; escala vem de
+  `monitors`.
+- **`parakeet.rs` — transcrição.** No Linux, `helper::transcribe(wav)` chama o Parakeet, então
+  `transcribe.rs` não muda (o motor "apple" significa "o do sistema"). Sobe
+  `sherpa-onnx-ws-linux-x64 --model-type=nemo_transducer --port=<livre>` com `LD_LIBRARY_PATH` na pasta do
+  binário, espera `Listening on` no stderr, corta o áudio em ilhas de fala (`audio::speech_islands` +
+  `hex::plan_clips`, como o Hex já faz), manda cada clip pelo WebSocket (`[i32 LE sample_rate][i32 LE
+  bytes][f32 samples]`, resposta JSON, depois `Done`), junta tokens em palavras e soma o início do clip.
+  `WordTiming` medido (`estimated: false`), `source: "parakeet"`. Binário: `SCRAWL_SHERPA_WS`, senão
+  `~/.local/opt/openwhispr/*/resources/bin/sherpa-onnx-ws-linux-x64`. Modelo: `SCRAWL_PARAKEET_DIR`, senão
+  `~/.cache/openwhispr/parakeet-models/parakeet-tdt-0.6b-v3`. Faltou algum: bundle sem transcrição, log diz
+  o que falta. Crate nova: `tungstenite` (sem TLS).
 - **`toggle.rs` — liga/desliga.** `scrawl toggle`: se `$XDG_RUNTIME_DIR/scrawl/record.pid` aponta para um
-  processo vivo, manda SIGINT e sai; senão inicia `scrawl record --until-stopped` desanexado (setsid) e
-  grava o pid. `record --until-stopped` troca o `sleep(duration)` por espera até SIGINT/SIGTERM (handler
-  com `libc` setando um `AtomicBool`); `--duration` continua existindo. Pid velho (processo morto) é
-  ignorado e sobrescrito.
-- **`record` em `main.rs`.** O braço `Command::Record { iphone: false }` passa a chamar
-  `ScreenSession`/`WindowLogger` do sistema certo via `cfg`; o resto (`AudioRecorder`,
-  `finalize_capture_bundle`) é o mesmo código. Depois do bundle, no Linux, copia para a área de
-  transferência e chama a entrega existente (`handoff`/`delivery`), igual ao que o app do Mac faz ao parar.
+  processo vivo, manda SIGINT e sai; senão inicia `scrawl record --until-stopped` desanexado (`setsid`) e
+  grava o pid. `record --until-stopped` espera SIGINT/SIGTERM (handler com `libc` setando um `AtomicBool`) no
+  lugar do `sleep(duration)`. Pid velho (processo morto) é ignorado e sobrescrito. O próprio `record` apaga o
+  pidfile ao terminar.
+- **`linux::record` (em `src/linux/mod.rs`).** No Linux, o braço `Command::Record { iphone: false }` chama
+  `linux::record(window, duration, until_stopped, note, out)`, que junta `hypr::discover_target`,
+  `AudioRecorder`, `ScreenSession`, `hypr::WindowLogger` e o mesmo `finalize_capture_bundle` do Mac; depois
+  `copy_bundle_to_clipboard` e `notify-send`. O braço do Mac não muda.
 
 ### Fluxo
 
 `⌥⇧S` → `scrawl toggle` → `scrawl record --until-stopped` → wf-recorder + cpal + hyprctl rodando →
-`⌥⇧S` → SIGINT → para tudo → candidatos via ffmpeg → whisper → `finalize_capture_bundle` →
-`wl-copy` + OpenCode → `notify-send`.
+`⌥⇧S` → SIGINT → para tudo → candidatos via ffmpeg → Parakeet → `finalize_capture_bundle` →
+`wl-copy` → `notify-send`.
 
 ### Erros
 
-- `wf-recorder` ausente ou sai na hora: aborta com mensagem clara e notificação; nada de bundle vazio.
+- `wf-recorder` ausente ou sai no primeiro segundo: aborta com mensagem clara e notificação, sem bundle.
 - Sem mic (`cpal` falha): grava sem áudio, como hoje.
-- Sem whisper/modelo: bundle sem transcrição + aviso com o comando para instalar.
-- `hyprctl` falha (fora do Hyprland): grava o monitor inteiro sem log de janelas.
-- `scrawl toggle` duplo rápido: o pidfile é escrito antes do recorder subir; o segundo toggle sempre para.
+- Sem Parakeet: bundle sem transcrição (`source: "offline"`, como hoje quando o SpeechAnalyzer falha) + log.
+- `hyprctl` falha (fora do Hyprland): grava o primeiro monitor de `wf-recorder` sem log de janelas.
+- `scrawl toggle` duplo rápido: o pidfile é escrito pelo `toggle` logo após o spawn; o segundo toggle para.
 
 ## Testes
 
-- Os testes existentes dos módulos puros (`keyframes`, `sketch`, `render`, `routing`, `handoff`, `model`,
-  `autocrop`, `agent_context`) precisam passar no Linux.
-- Novos testes por parser, com saídas reais gravadas como fixture: `ffprobe` JSON → `Probe`; JSON do
-  `whisper-cli -ml 1` → `TranscriptData`; `hyprctl -j clients`/`monitors`/`cursorpos` → snapshots e target;
-  pidfile do toggle (vivo, morto, ausente).
+- Os testes existentes dos módulos portáveis precisam passar no Linux.
+- Novos testes com saídas reais como fixture: JSON do `ffprobe` → `Probe`; JSON do sherpa → palavras;
+  `hyprctl -j clients`/`monitors`/`cursorpos` → entradas e alvo; pidfile do toggle (vivo, morto, ausente).
 - Fim a fim manual: `scrawl record --duration 8` e `scrawl toggle` duas vezes, depois abrir
   `contact-sheet.png` e `summary.md` do bundle (princípio 5 do `AGENTS.md`).
-- Todo `cargo build`/`test` roda só depois de avisar, com `nice -n 19 ionice -c 3 cargo … -j 2`.
+- Todo `cargo build`/`test` roda só depois de avisar o usuário, com `nice -n 19 ionice -c 3 cargo … -j 2`.
 
 ## Dependências novas
 
-- Crate: `ab_glyph` (Linux). Nada mais.
-- Sistema: `wf-recorder`, `ffmpeg`, `wl-clipboard`, `libnotify`, `whisper.cpp` (AUR `whisper.cpp` ou
-  `whisper.cpp-cuda`) + modelo ggml multilíngue.
+- Crates (só Linux): `ab_glyph`, `tungstenite` (`default-features = false, features = ["handshake"]`).
+- Sistema: `wf-recorder`, `ffmpeg`, `wl-clipboard`, `libnotify`, `fontconfig`, OpenWhispr (já instalado).
