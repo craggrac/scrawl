@@ -3,3 +3,4 @@
 pub mod hypr;
 pub mod media;
 pub mod parakeet;
+pub mod record;
