@@ -1653,10 +1653,102 @@ mod native_text {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod linux_text {
+    use std::sync::OnceLock;
+
+    use ab_glyph::{Font, FontVec, Glyph, PxScale, ScaleFont, point};
+
+    fn load(pattern: &str) -> Option<FontVec> {
+        let out = std::process::Command::new("fc-match")
+            .args(["-f", "%{file}", pattern])
+            .output()
+            .ok()?;
+        let path = String::from_utf8(out.stdout).ok()?;
+        FontVec::try_from_vec(std::fs::read(path.trim()).ok()?).ok()
+    }
+
+    /// The system's sans font, found once by fontconfig.
+    fn font(bold: bool) -> Option<&'static FontVec> {
+        static REGULAR: OnceLock<Option<FontVec>> = OnceLock::new();
+        static BOLD: OnceLock<Option<FontVec>> = OnceLock::new();
+        if bold {
+            BOLD.get_or_init(|| load("sans:bold"))
+        } else {
+            REGULAR.get_or_init(|| load("sans"))
+        }
+        .as_ref()
+    }
+
+    /// One line of glyphs from x = 0 with the baseline at the ascent, and its advance.
+    fn layout(font: &FontVec, text: &str, size: f32) -> (Vec<Glyph>, f32) {
+        let scaled = font.as_scaled(PxScale::from(size));
+        let mut x = 0.0;
+        let mut previous = None;
+        let glyphs = text
+            .chars()
+            .map(|ch| {
+                let id = scaled.glyph_id(ch);
+                if let Some(previous) = previous {
+                    x += scaled.kern(previous, id);
+                }
+                let glyph = id.with_scale_and_position(size, point(x, scaled.ascent()));
+                x += scaled.h_advance(id);
+                previous = Some(id);
+                glyph
+            })
+            .collect();
+        (glyphs, x)
+    }
+
+    pub fn width(text: &str, size: f32, bold: bool) -> Option<f32> {
+        Some(layout(font(bold)?, text, size).1)
+    }
+
+    /// A coverage mask with the same 2 px margin as the CoreText one.
+    pub fn mask(text: &str, size: f32, bold: bool) -> Option<(usize, usize, Vec<u8>)> {
+        let font = font(bold)?;
+        let scaled = font.as_scaled(PxScale::from(size));
+        let (glyphs, advance) = layout(font, text, size);
+        let width = advance.ceil().max(1.0) as usize + 4;
+        let height =
+            (scaled.ascent() - scaled.descent() + scaled.line_gap()).ceil().max(1.0) as usize + 4;
+        let mut pixels = vec![0_u8; width * height];
+        for glyph in glyphs {
+            let Some(outline) = font.outline_glyph(glyph) else {
+                continue;
+            };
+            let bounds = outline.px_bounds();
+            outline.draw(|gx, gy, coverage| {
+                let px = bounds.min.x as i64 + i64::from(gx) + 2;
+                let py = bounds.min.y as i64 + i64::from(gy) + 2;
+                if (0..width as i64).contains(&px) && (0..height as i64).contains(&py) {
+                    let cell = &mut pixels[py as usize * width + px as usize];
+                    *cell = (*cell).max((coverage.clamp(0.0, 1.0) * 255.0) as u8);
+                }
+            });
+        }
+        Some((width, height, pixels))
+    }
+}
+
+#[cfg(target_os = "macos")]
+use native_text::mask as text_mask;
+#[cfg(target_os = "linux")]
+use linux_text::mask as text_mask;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn text_mask(_text: &str, _size: f32, _bold: bool) -> Option<(usize, usize, Vec<u8>)> {
+    None
+}
+
 fn text_width(text: &str, size: f32, bold: bool) -> f32 {
     #[cfg(target_os = "macos")]
     if let Some((_, line)) = native_text::line(text, size, bold) {
         return line.get_typographic_bounds().width as f32;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(width) = linux_text::width(text, size, bold) {
+        return width;
     }
     let _ = bold;
     text.chars().count() as f32 * size * 6.0 / 7.0
@@ -1674,8 +1766,7 @@ fn draw_text(
     if text.is_empty() || size <= 0.0 {
         return;
     }
-    #[cfg(target_os = "macos")]
-    if let Some((width, height, pixels)) = native_text::mask(text, size, bold) {
+    if let Some((width, height, pixels)) = text_mask(text, size, bold) {
         for py in 0..height {
             for px in 0..width {
                 blend(
@@ -1797,6 +1888,17 @@ fn glyph(ch: char) -> [u8; 7] {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_text_uses_a_real_font() {
+        let (width, height, pixels) =
+            linux_text::mask("Scrawl ação", 16.0, false).expect("fc-match found no sans font");
+        assert!(width > 40 && height >= 16, "{width}x{height}");
+        assert!(pixels.iter().any(|&p| p > 200));
+        // The 5×7 fallback gives every character the same width; a real font doesn't.
+        assert!(text_width("WWWW", 16.0, true) > text_width("iiii", 16.0, true) * 1.5);
+    }
 
     fn key(index: usize) -> Keyframe {
         Keyframe {
