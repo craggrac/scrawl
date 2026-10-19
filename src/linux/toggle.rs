@@ -1,11 +1,13 @@
 //! `scrawl toggle`: one command for a Hyprland key bind that starts a recording, or stops the
 //! one running. The running recorder's pid lives in `$XDG_RUNTIME_DIR/scrawl/record.pid`.
 
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// What a key press should do.
 #[derive(Debug, PartialEq, Eq)]
@@ -14,11 +16,11 @@ pub enum Toggle {
     Start,
 }
 
-/// Where the running recorder's pid is kept.
-pub fn pidfile() -> PathBuf {
+/// Where the running recorder's pid is kept: a per-user directory, never the shared temp dir.
+pub fn pidfile() -> Option<PathBuf> {
     dirs::runtime_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("scrawl/record.pid")
+        .or_else(dirs::state_dir)
+        .map(|dir| dir.join("scrawl/record.pid"))
 }
 
 /// Stop the pid in the file if `is_recorder` says it is still our recorder; else start one.
@@ -39,7 +41,9 @@ fn is_recorder(pid: i32) -> bool {
 
 /// Start a recording, or stop the running one.
 pub fn toggle() -> Result<()> {
-    let path = pidfile();
+    let Some(path) = pidfile() else {
+        bail!("No per-user runtime or state directory for the pidfile");
+    };
     match decide(std::fs::read_to_string(&path).ok().as_deref(), is_recorder) {
         Toggle::Stop(pid) => {
             unsafe {
@@ -50,8 +54,12 @@ pub fn toggle() -> Result<()> {
             let _ = std::fs::remove_file(&path);
         }
         Toggle::Start => {
-            std::fs::create_dir_all(path.parent().context("pidfile has no parent")?)?;
-            let child = Command::new(std::env::current_exe()?)
+            let parent = path.parent().context("pidfile has no parent")?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+            let mut child = Command::new(std::env::current_exe()?)
                 .args(["record", "--until-stopped"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -59,19 +67,43 @@ pub fn toggle() -> Result<()> {
                 .process_group(0)
                 .spawn()
                 .context("Could not start scrawl record")?;
-            std::fs::write(&path, child.id().to_string())?;
+            if let Err(error) = write_pidfile(&path, child.id()) {
+                // No untracked recorder: the next press could not stop it.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
         }
     }
     Ok(())
 }
 
+fn write_pidfile(path: &Path, pid: u32) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .context("Could not write the pidfile")?;
+    write!(file, "{pid}")?;
+    Ok(())
+}
+
 /// Called by the recorder once it stops listening for SIGINT: forget our pid.
 pub fn clear_pidfile() {
-    let path = pidfile();
-    let ours = std::fs::read_to_string(&path)
+    if let Some(path) = pidfile() {
+        clear_pidfile_at(&path, std::process::id());
+    }
+}
+
+/// Removes `path` only if it holds `pid`.
+fn clear_pidfile_at(path: &Path, pid: u32) {
+    let ours = std::fs::read_to_string(path)
         .ok()
         .and_then(|c| c.trim().parse::<u32>().ok())
-        == Some(std::process::id());
+        == Some(pid);
     if ours {
         let _ = std::fs::remove_file(path);
     }
@@ -96,5 +128,32 @@ mod tests {
         assert_eq!(decide(None, |_| true), Toggle::Start);
         assert_eq!(decide(Some("abc"), |_| true), Toggle::Start);
         assert_eq!(decide(Some("0"), |_| true), Toggle::Start);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("scrawl-toggle-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("record.pid")
+    }
+
+    #[test]
+    fn our_own_pidfile_is_removed() {
+        let path = scratch("ours");
+        std::fs::write(&path, "77").unwrap();
+        clear_pidfile_at(&path, 77);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn another_recorders_pidfile_is_kept() {
+        let path = scratch("other");
+        std::fs::write(&path, "78").unwrap();
+        clear_pidfile_at(&path, 77);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_missing_pidfile_is_a_no_op() {
+        clear_pidfile_at(&scratch("missing"), 77);
     }
 }
