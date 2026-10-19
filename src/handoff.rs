@@ -11,9 +11,10 @@ pub fn default_captures_dir() -> PathBuf {
     std::env::var_os("SCRAWL_CAPTURES_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            dirs::home_dir()
+            // `~/Library/Application Support` on macOS, `~/.local/share` on Linux.
+            dirs::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("Library/Application Support/scrawl/captures")
+                .join("scrawl/captures")
         })
 }
 
@@ -1224,6 +1225,15 @@ fn existing_keyframes(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn captures_live_in_the_platform_data_dir() {
+        if std::env::var_os("SCRAWL_CAPTURES_DIR").is_some() {
+            return;
+        }
+        let expected = dirs::data_dir().unwrap().join("scrawl/captures");
+        assert_eq!(default_captures_dir(), expected);
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {

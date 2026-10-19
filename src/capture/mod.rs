@@ -114,7 +114,11 @@ pub fn scrawl_log(msg: impl AsRef<str>) {
         .as_millis();
     let line = format!("[{ts}] {}\n", msg.as_ref());
     eprint!("{line}");
-    let Some(dir) = dirs::home_dir().map(|home| home.join("Library/Logs/Scrawl")) else {
+    #[cfg(target_os = "macos")]
+    let dir = dirs::home_dir().map(|home| home.join("Library/Logs/Scrawl"));
+    #[cfg(not(target_os = "macos"))]
+    let dir = dirs::state_dir().map(|state| state.join("scrawl"));
+    let Some(dir) = dir else {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
