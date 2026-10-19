@@ -457,7 +457,7 @@ pub fn plan_clips(islands: &[(u64, u64)], duration_ms: u64) -> Vec<(u64, u64)> {
     clips
 }
 
-fn ends_sentence(word: &str) -> bool {
+pub(crate) fn ends_sentence(word: &str) -> bool {
     word.trim_end_matches(['"', '\'', '”', '’', ')', ']'])
         .ends_with(['.', '!', '?', ';', ':'])
 }

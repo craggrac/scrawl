@@ -16,10 +16,13 @@ use serde::Deserialize;
 
 #[cfg(not(target_os = "linux"))]
 use crate::model::RgbaFrame;
+#[cfg(not(target_os = "linux"))]
 use crate::model::{TranscriptData, TranscriptSegment, WordTiming};
 
 #[cfg(target_os = "linux")]
 pub use crate::linux::media::{export_audio, frames, probe, shrink};
+#[cfg(target_os = "linux")]
+pub use crate::linux::parakeet::transcribe;
 
 pub fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("SCRAWL_HELPER") {
@@ -117,6 +120,7 @@ pub fn devices() -> Result<Vec<PhoneDevice>> {
     run(&[os("devices")], Duration::from_secs(5))
 }
 
+#[cfg(not(target_os = "linux"))]
 #[derive(Deserialize)]
 struct Transcript {
     locale: String,
@@ -126,6 +130,7 @@ struct Transcript {
 }
 
 /// On-device SpeechAnalyzer transcription with measured word timings.
+#[cfg(not(target_os = "linux"))]
 pub fn transcribe(audio: &Path) -> Result<TranscriptData> {
     let transcript: Transcript = run(
         &[os("transcribe"), audio.as_os_str()],
