@@ -205,7 +205,7 @@ fn try_hex(audio: &RecordedAudio) -> Result<Option<TranscriptData>> {
 
 fn apple(wav: &Path) -> TranscriptData {
     crate::helper::transcribe(wav).unwrap_or_else(|error| {
-        crate::capture::scrawl_log(format!("SpeechAnalyzer failed: {error:#}"));
+        crate::capture::scrawl_log(format!("Transcription failed: {error:#}"));
         TranscriptData {
             source: "offline".into(),
             ..Default::default()

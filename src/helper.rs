@@ -298,11 +298,13 @@ pub fn frames(movie: &Path, times: FrameTimes, max_edge: u32) -> Result<Vec<Rgba
     frames
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Deserialize)]
 struct QrOutput {
     qr: String,
 }
 
+#[cfg(target_os = "macos")]
 /// Renders `text` as a compact Unicode half-block QR code for the terminal via CoreImage.
 pub fn qr(text: &str) -> Result<String> {
     let out: QrOutput = run(&[os("qr"), os(text)], Duration::from_secs(5))?;

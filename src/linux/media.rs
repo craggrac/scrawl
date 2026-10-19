@@ -84,6 +84,9 @@ fn input(command: &mut Command, movie: &Path) {
         .arg(url);
 }
 
+/// Least time ffmpeg gets to decode a movie; `frames(Every)` stretches it with the duration.
+const DECODE_DEADLINE: Duration = Duration::from_secs(300);
+
 pub fn probe(movie: &Path) -> Result<Probe> {
     let mut command = Command::new("ffprobe");
     command
@@ -156,15 +159,15 @@ pub fn scaled_size(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
 }
 
 /// Runs ffmpeg with `filter` and splits its raw RGBA stdout into `width`×`height` frames.
-/// A watchdog kills ffmpeg after `DECODE_DEADLINE`, which ends the stdout read.
+/// A watchdog kills ffmpeg after `deadline`, which ends the stdout read.
 fn decode(
     movie: &Path,
     seek_ms: Option<u64>,
     filter: &str,
     (width, height): (u32, u32),
     limit: Option<usize>,
+    deadline: Duration,
 ) -> Result<Vec<Vec<u8>>> {
-    const DECODE_DEADLINE: Duration = Duration::from_secs(300);
     let mut command = Command::new("ffmpeg");
     command.args(["-v", "error", "-nostdin"]);
     if let Some(ms) = seek_ms {
@@ -194,7 +197,7 @@ fn decode(
     let watchdog = {
         let (child, timed_out) = (Arc::clone(&child), Arc::clone(&timed_out));
         std::thread::spawn(move || {
-            if wait.recv_timeout(DECODE_DEADLINE) == Err(mpsc::RecvTimeoutError::Timeout) {
+            if wait.recv_timeout(deadline) == Err(mpsc::RecvTimeoutError::Timeout) {
                 timed_out.store(true, Ordering::SeqCst);
                 let _ = child.lock().map(|mut child| child.kill());
             }
@@ -207,7 +210,11 @@ fn decode(
         match stdout.read_exact(&mut frame) {
             Ok(()) => frames.push(frame),
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break Ok(()),
-            Err(error) => break Err(error),
+            Err(error) => {
+                // So the `wait` below can't block on a live ffmpeg.
+                let _ = child.lock().map(|mut child| child.kill());
+                break Err(error);
+            }
         }
     };
     drop(done);
@@ -220,7 +227,7 @@ fn decode(
     ensure!(
         !timed_out.load(Ordering::SeqCst),
         "ffmpeg timed out after {} s",
-        DECODE_DEADLINE.as_secs()
+        deadline.as_secs()
     );
     read?;
     ensure!(status.success(), "ffmpeg failed: {}", stderr.trim());
@@ -241,7 +248,10 @@ pub fn frames(movie: &Path, times: FrameTimes, max_edge: u32) -> Result<Vec<Rgba
         FrameTimes::Every(ms) => {
             let ms = ms.max(1);
             let filter = format!("fps=1000/{ms},{scale}");
-            Ok(decode(movie, None, &filter, size, None)?
+            // Long recordings take longer to decode than the fixed floor allows.
+            let deadline =
+                DECODE_DEADLINE.max(Duration::from_millis(probe.duration_ms.saturating_mul(2)));
+            Ok(decode(movie, None, &filter, size, None, deadline)?
                 .into_iter()
                 .enumerate()
                 .map(|(i, rgba)| RgbaFrame::new(i as u64 * ms, size.0, size.1, rgba))
@@ -260,10 +270,16 @@ pub fn frames(movie: &Path, times: FrameTimes, max_edge: u32) -> Result<Vec<Rgba
                             chunk
                                 .iter()
                                 .map(|&t| {
-                                    let rgba =
-                                        decode(movie, Some(t.min(last)), scale, size, Some(1))?
-                                            .pop()
-                                            .with_context(|| format!("No frame at {t} ms"))?;
+                                    let rgba = decode(
+                                        movie,
+                                        Some(t.min(last)),
+                                        scale,
+                                        size,
+                                        Some(1),
+                                        DECODE_DEADLINE,
+                                    )?
+                                    .pop()
+                                    .with_context(|| format!("No frame at {t} ms"))?;
                                     Ok(RgbaFrame::new(t, size.0, size.1, rgba))
                                 })
                                 .collect()

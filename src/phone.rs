@@ -1145,6 +1145,7 @@ fn bearer_token(header: &str) -> Option<&str> {
     })
 }
 
+#[cfg(target_os = "macos")]
 /// Discovers this Mac's candidate Scrawl ingest base URLs on `port`: Tailscale IPv4 first,
 /// followed by `en0` / `en1` LAN IPs.
 pub fn discover_default_ingest_urls(port: u16) -> Vec<String> {
@@ -1191,6 +1192,7 @@ pub fn discover_default_ingest_urls(port: u16) -> Vec<String> {
     urls
 }
 
+#[cfg(target_os = "macos")]
 fn normalize_http_base_url(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     let lower = trimmed.to_ascii_lowercase();
@@ -1205,6 +1207,7 @@ fn normalize_http_base_url(raw: &str) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
+#[cfg(target_os = "macos")]
 /// Formats `<scheme>://scrawl?url=<urlencoded base>[&url=<second>]&token=<token>[&session=ses_…]`.
 pub fn format_setup_link(
     scheme: &str,
@@ -2064,6 +2067,7 @@ mod tests {
         assert!(!constant_time_eq(&format!("{token}extra"), token));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn setup_link_formats_and_escapes_urls_token_and_session() {
         let urls = vec![

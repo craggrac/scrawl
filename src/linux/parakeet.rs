@@ -22,6 +22,12 @@ const SAMPLES_PER_MS: u64 = 16;
 const CLIP_PAD_MS: u64 = 200;
 /// Shorter than this and too quiet for islands: nothing worth sending.
 const MIN_WHOLE_MS: u64 = 480;
+/// Longest clip sent to the model; Parakeet degrades on long audio.
+const MAX_CLIP_MS: u64 = 30_000;
+/// Islands closer than this belong to one clip, if it stays within `MAX_CLIP_MS`.
+const MERGE_GAP_MS: u64 = 700;
+/// Islands shorter than this are clicks and breaths.
+const MIN_ISLAND_MS: u64 = 120;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const CLIP_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -81,12 +87,51 @@ pub fn segments(words: &[WordTiming]) -> Vec<TranscriptSegment> {
             segments.push(TranscriptSegment {
                 t0: phrase[0].t0,
                 t1: word.t1,
-                text: phrase.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
+                text: phrase
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
             });
             start = index + 1;
         }
     }
     segments
+}
+
+/// Splits `[start, end)` into chunks of at most `MAX_CLIP_MS`.
+fn split_span(start: u64, end: u64) -> impl Iterator<Item = (u64, u64)> {
+    (start..end)
+        .step_by(MAX_CLIP_MS as usize)
+        .map(move |from| (from, (from + MAX_CLIP_MS).min(end)))
+}
+
+/// Clips of at most 30 s: islands under 120 ms dropped, close ones (gap under 700 ms) merged
+/// while the clip fits, longer ones split. No islands means the whole file in chunks, unless
+/// it is too short to be worth sending.
+pub fn plan_clips(islands: &[(u64, u64)], duration_ms: u64) -> Vec<(u64, u64)> {
+    if islands.is_empty() {
+        return if duration_ms >= MIN_WHOLE_MS {
+            split_span(0, duration_ms).collect()
+        } else {
+            Vec::new()
+        };
+    }
+    let mut clips: Vec<(u64, u64)> = Vec::new();
+    for &(start, end) in islands {
+        if end.saturating_sub(start) < MIN_ISLAND_MS {
+            continue;
+        }
+        match clips.last_mut() {
+            Some(last)
+                if start.saturating_sub(last.1) < MERGE_GAP_MS && end - last.0 <= MAX_CLIP_MS =>
+            {
+                last.1 = end;
+            }
+            _ => clips.extend(split_span(start, end)),
+        }
+    }
+    clips
 }
 
 /// `SCRAWL_SHERPA_WS`, else the server in the most recently installed OpenWhispr.
@@ -107,7 +152,9 @@ fn server_binary() -> Option<PathBuf> {
 fn model_dir() -> Option<PathBuf> {
     std::env::var_os("SCRAWL_PARAKEET_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::cache_dir().map(|c| c.join("openwhispr/parakeet-models").join(MODEL_NAME)))
+        .or_else(|| {
+            dirs::cache_dir().map(|c| c.join("openwhispr/parakeet-models").join(MODEL_NAME))
+        })
         .filter(|dir| dir.join("tokens.txt").is_file())
 }
 
@@ -128,7 +175,9 @@ impl Server {
         loop {
             match Self::spawn(binary, model) {
                 Err(error) if attempt < 2 => {
-                    crate::capture::scrawl_log(format!("sherpa-onnx start failed, retrying: {error:#}"));
+                    crate::capture::scrawl_log(format!(
+                        "sherpa-onnx start failed, retrying: {error:#}"
+                    ));
                     attempt += 1;
                 }
                 result => return result,
@@ -137,7 +186,9 @@ impl Server {
     }
 
     fn spawn(binary: &Path, model: &Path) -> Result<Self> {
-        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?.port();
+        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?
+            .local_addr()?
+            .port();
         let file = |flag: &str, name: &str| format!("--{flag}={}", model.join(name).display());
         let child = Command::new(binary)
             .env("LD_LIBRARY_PATH", binary.parent().unwrap_or(Path::new(".")))
@@ -145,8 +196,14 @@ impl Server {
             .arg(file("encoder", "encoder.int8.onnx"))
             .arg(file("decoder", "decoder.int8.onnx"))
             .arg(file("joiner", "joiner.int8.onnx"))
-            .args(["--model-type=nemo_transducer", "--num-threads=4", "--num-work-threads=1"])
+            .args([
+                "--model-type=nemo_transducer",
+                "--num-threads=4",
+                "--num-work-threads=1",
+            ])
             .arg(format!("--port={port}"))
+            .arg("--log-file=/dev/null")
+            .current_dir(std::env::temp_dir())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -154,7 +211,11 @@ impl Server {
             .with_context(|| format!("Could not start {}", binary.display()))?;
         // Owned by a `Server` first, so even the early return below kills and reaps the child.
         let mut server = Self { child, port };
-        let stderr = server.child.stderr.take().context("No sherpa-onnx stderr")?;
+        let stderr = server
+            .child
+            .stderr
+            .take()
+            .context("No sherpa-onnx stderr")?;
         let (ready, started) = std::sync::mpsc::channel();
         // Keeps draining stderr after the ready line so the pipe never fills.
         std::thread::spawn(move || {
@@ -166,7 +227,10 @@ impl Server {
         });
         match started.recv_timeout(STARTUP_TIMEOUT) {
             Ok(()) => Ok(server),
-            Err(_) => bail!("sherpa-onnx did not start within {} s", STARTUP_TIMEOUT.as_secs()),
+            Err(_) => bail!(
+                "sherpa-onnx did not start within {} s",
+                STARTUP_TIMEOUT.as_secs()
+            ),
         }
     }
 
@@ -212,11 +276,8 @@ pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
     })?;
     let samples = audio::decode_wav_16k(&std::fs::read(wav)?)?;
     let duration_ms = samples.len() as u64 / SAMPLES_PER_MS;
-    let mut clips = crate::hex::plan_clips(&audio::speech_islands(&samples), duration_ms);
-    if clips.is_empty() && duration_ms >= MIN_WHOLE_MS {
-        // Too quiet to find speech by energy: let Parakeet hear the whole thing.
-        clips.push((0, duration_ms));
-    }
+    // No islands (too quiet to find speech by energy): Parakeet hears the whole thing.
+    let clips = plan_clips(&audio::speech_islands(&samples), duration_ms);
     let mut transcript = TranscriptData {
         source: "parakeet".into(),
         model: Some(MODEL_NAME.into()),
@@ -226,6 +287,8 @@ pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
         return Ok(transcript);
     }
     let server = Server::start(&binary, &model)?;
+    let total = clips.len();
+    let mut failed = 0;
     for (start, end) in clips {
         let from_ms = start.saturating_sub(CLIP_PAD_MS);
         let from = (from_ms * SAMPLES_PER_MS) as usize;
@@ -233,8 +296,18 @@ pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
         if from >= to {
             continue;
         }
-        let result = server.transcribe(&samples[from..to])?;
-        transcript.words.extend(words(&result, from_ms));
+        match server.transcribe(&samples[from..to]) {
+            Ok(result) => transcript.words.extend(words(&result, from_ms)),
+            Err(error) => {
+                failed += 1;
+                crate::capture::scrawl_log(format!(
+                    "Parakeet skipped the clip at {start} ms: {error:#}"
+                ));
+            }
+        }
+    }
+    if failed == total {
+        bail!("Parakeet failed on all {total} clips");
     }
     transcript.segments = segments(&transcript.words);
     transcript.text = transcript
@@ -260,7 +333,20 @@ mod tests {
         let texts: Vec<_> = words.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(
             texts,
-            ["Olha", "esse", "botão", "aqui,", "ele", "não", "salva", "o", "formulário", "quando", "eu", "clico."]
+            [
+                "Olha",
+                "esse",
+                "botão",
+                "aqui,",
+                "ele",
+                "não",
+                "salva",
+                "o",
+                "formulário",
+                "quando",
+                "eu",
+                "clico."
+            ]
         );
         assert_eq!((words[0].t0, words[0].t1), (1_000, 1_320));
         assert_eq!((words[2].t0, words[2].t1), (1_640, 1_880));
@@ -291,6 +377,42 @@ mod tests {
         assert!(segments[0].text.starts_with("Olha esse botão aqui,"));
     }
 
+    #[test]
+    fn close_islands_merge_within_the_cap() {
+        let clips = plan_clips(&[(1_000, 2_000), (2_500, 3_000), (10_000, 11_000)], 20_000);
+        assert_eq!(clips, [(1_000, 3_000), (10_000, 11_000)]);
+    }
+
+    #[test]
+    fn merging_never_passes_30_seconds() {
+        let clips = plan_clips(&[(0, 20_000), (20_300, 40_000)], 40_000);
+        assert_eq!(clips, [(0, 20_000), (20_300, 40_000)]);
+        assert!(clips.iter().all(|(s, e)| e - s <= MAX_CLIP_MS));
+    }
+
+    #[test]
+    fn a_long_island_splits_into_30_second_chunks() {
+        let clips = plan_clips(&[(5_000, 70_000)], 80_000);
+        assert_eq!(clips, [(5_000, 35_000), (35_000, 65_000), (65_000, 70_000)]);
+    }
+
+    #[test]
+    fn tiny_islands_are_dropped() {
+        assert_eq!(
+            plan_clips(&[(0, 100), (5_000, 6_000)], 10_000),
+            [(5_000, 6_000)]
+        );
+    }
+
+    #[test]
+    fn quiet_audio_becomes_whole_file_chunks() {
+        assert_eq!(
+            plan_clips(&[], 65_000),
+            [(0, 30_000), (30_000, 60_000), (60_000, 65_000)]
+        );
+        assert!(plan_clips(&[], 300).is_empty());
+    }
+
     /// Loads the 0.6B model (~1 GB RAM, a few seconds): `cargo test -- --ignored parakeet`.
     #[test]
     #[ignore]
@@ -317,7 +439,11 @@ mod tests {
         assert!(converted.success());
         let transcript = transcribe(&wav).unwrap();
         assert_eq!(transcript.source, "parakeet");
-        assert!(transcript.text.to_lowercase().contains("botão"), "{}", transcript.text);
+        assert!(
+            transcript.text.to_lowercase().contains("botão"),
+            "{}",
+            transcript.text
+        );
         assert!(!transcript.estimated && !transcript.words.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }

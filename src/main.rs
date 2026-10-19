@@ -265,6 +265,7 @@ enum Command {
         transcriber: Option<crate::transcribe::Engine>,
     },
     /// List cabled iPhones and iPads that can be captured.
+    #[cfg(target_os = "macos")]
     Devices,
     /// Try a one-frame ScreenCaptureKit capture in this process and print the result as JSON,
     /// once or (with `--watch`) every second, to see whether a Screen Recording grant reaches a
@@ -540,6 +541,7 @@ enum Command {
         capture_screenshot: Option<PathBuf>,
     },
     /// Print a `<scheme>://scrawl?url=…&token=…` setup link (and QR code) for ScrawlKit on iPhone.
+    #[cfg(target_os = "macos")]
     #[command(alias = "tether-link")]
     Link {
         /// URL scheme of the iOS app (for example `updown`).
@@ -1933,6 +1935,7 @@ fn main() -> Result<()> {
             hex_status();
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::Devices => {
             for device in helper::devices()? {
                 println!("{}\t{}", device.name, device.id);
@@ -2290,6 +2293,7 @@ fn main() -> Result<()> {
             ui::run_app(initial, false, false, capture_screenshot);
             Ok(())
         }
+        #[cfg(target_os = "macos")]
         Command::Link {
             scheme,
             urls,

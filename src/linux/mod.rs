@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::audio::AudioRecorder;
 use crate::capture::scrawl_log;
@@ -31,6 +31,14 @@ fn install_stop_signals() {
     unsafe {
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
+    }
+}
+
+/// After the stop, so a second Ctrl-C in a terminal kills scrawl itself.
+fn restore_default_signals() {
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
     }
 }
 
@@ -90,14 +98,8 @@ fn record_bundle(
     });
     let created = !bundle_dir.exists();
     std::fs::create_dir_all(&bundle_dir)?;
-    capture_into(&bundle_dir, window, duration, until_stopped, note).inspect_err(|error| {
+    capture_into(&bundle_dir, window, duration, until_stopped, note, created).inspect_err(|error| {
         scrawl_log(format!("Recording failed: {error:#}"));
-        // No empty bundle for `latest` to find; a directory the user gave us stays theirs.
-        if created {
-            let _ = std::fs::remove_dir_all(&bundle_dir);
-        } else {
-            let _ = std::fs::remove_file(bundle_dir.join("recording.mp4"));
-        }
     })
 }
 
@@ -107,34 +109,61 @@ fn capture_into(
     duration: u64,
     until_stopped: bool,
     note: Option<String>,
+    created: bool,
 ) -> Result<PathBuf> {
     let target = hypr::discover_target(window);
     let started_at = Instant::now();
     let audio = AudioRecorder::start().ok();
-    let session =
-        record::ScreenSession::start(&target, &bundle_dir.join("recording.mp4"), started_at)?;
-    let window_log = (target.mode == CaptureMode::Display)
-        .then(|| hypr::WindowLogger::start(target.frame, started_at, Arc::default()));
-    notify("Recording. Press the shortcut again to stop.");
-    wait_for_stop(duration, until_stopped);
-    toggle::clear_pidfile();
-    let recording = session.stop()?;
-    let activity = window_log.map(hypr::WindowLogger::stop).unwrap_or_default();
-    let recorded_audio = audio.and_then(|a| {
-        a.stop()
-            .inspect_err(|error| scrawl_log(format!("Audio: {error:#}")))
-            .ok()
-    });
-    let (dir, _bundle, summary) = crate::finalize_capture_bundle(
-        bundle_dir,
-        target,
-        recording,
-        Vec::new(),
-        Vec::new(),
-        recorded_audio,
-        note,
-        activity,
-    )?;
-    print!("{summary}");
-    Ok(dir)
+    let video = bundle_dir.join("recording.mp4");
+    let session = match record::ScreenSession::start(&target, &video, started_at) {
+        Ok(session) => session,
+        Err(error) => {
+            // Nothing was recorded: no empty bundle for `latest` to find, and a directory the
+            // user gave us stays theirs.
+            if created {
+                let _ = std::fs::remove_dir_all(bundle_dir);
+            } else {
+                let _ = std::fs::remove_file(&video);
+            }
+            return Err(error);
+        }
+    };
+    // From here the recording is never deleted, however later steps fail.
+    let finish = || -> Result<PathBuf> {
+        let window_log = (target.mode == CaptureMode::Display)
+            .then(|| hypr::WindowLogger::start(target.frame, started_at, Arc::default()));
+        notify(&if until_stopped {
+            "Recording. Press the shortcut again to stop.".to_owned()
+        } else {
+            format!("Recording for {} s.", duration.max(1))
+        });
+        wait_for_stop(duration, until_stopped);
+        restore_default_signals();
+        toggle::clear_pidfile();
+        let recording = session.stop()?;
+        let activity = window_log.map(hypr::WindowLogger::stop).unwrap_or_default();
+        let recorded_audio = audio.and_then(|a| {
+            a.stop()
+                .inspect_err(|error| scrawl_log(format!("Audio: {error:#}")))
+                .ok()
+        });
+        let (dir, _bundle, summary) = crate::finalize_capture_bundle(
+            bundle_dir,
+            target,
+            recording,
+            Vec::new(),
+            Vec::new(),
+            recorded_audio,
+            note,
+            activity,
+        )?;
+        print!("{summary}");
+        Ok(dir)
+    };
+    finish().with_context(|| {
+        format!(
+            "The recording is kept in {}",
+            video.display()
+        )
+    })
 }
