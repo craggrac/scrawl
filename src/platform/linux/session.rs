@@ -4,7 +4,7 @@
 //! recorder when the capture finishes.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -24,6 +24,32 @@ pub struct ScreenCaptureSession {
     /// Set by `discard_screen_session`: a start still waiting gives up at once.
     cancel: Arc<AtomicBool>,
     events: EventSlot,
+    /// Counts this session in `recorders_running` until its recorder has stopped.
+    running: Option<Running>,
+}
+
+/// Sessions whose `wf-recorder` may still be running.
+static RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether any `wf-recorder` may still be running: quitting waits for them, since a recorder
+/// outlives the app otherwise.
+pub fn recorders_running() -> bool {
+    RUNNING.load(Ordering::Acquire) > 0
+}
+
+struct Running;
+
+impl Running {
+    fn new() -> Self {
+        RUNNING.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Starts recording `target` into `video` on the telemetry's capture clock (call after
@@ -62,12 +88,14 @@ pub fn start_screen_session(
             })
             .ok()
     });
+    let running = recorder.is_some().then(Running::new);
     ScreenCaptureSession {
         started_at,
         video,
         recorder,
         cancel,
         events,
+        running,
     }
 }
 
@@ -76,11 +104,13 @@ pub fn start_screen_session(
 pub fn discard_screen_session(session: ScreenCaptureSession) {
     session.cancel.store(true, Ordering::Release);
     if let Some(recorder) = session.recorder {
+        let running = session.running;
         // A recorder already running is stopped as it drops, off the UI thread.
         std::thread::spawn(move || {
             if recorder.join().is_err() {
                 scrawl_log("The recorder thread panicked");
             }
+            drop(running);
         });
     }
 }

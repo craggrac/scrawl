@@ -24,6 +24,9 @@ pub const PILL_CLASS: &str = "scrawl-pill";
 pub const PICKER_CLASS: &str = "scrawl-picker";
 /// The review window's app id.
 pub const REVIEW_CLASS: &str = "scrawl-review";
+/// The app id of the window that keeps `scrawl app` running: gpui quits on Linux when its
+/// last window closes, and the capsule closes between captures.
+pub const KEEP_ALIVE_CLASS: &str = "scrawl-keep-alive";
 /// Windows narrower or shorter than this (points) aren't offered by the picker.
 const MIN_WINDOW: i32 = 80;
 
@@ -134,7 +137,12 @@ fn eval_unsupported(reply: &str) -> bool {
 /// floats centred. Lua (`eval`) first, `keyword windowrulev2` on Hyprland before 0.53.
 pub fn install_window_rules(pill: [f32; 3], review: [f32; 2]) {
     let [width, height, top] = pill;
-    let lua = [pill_rule(width, height, top), picker_rule(), review_rule(review[0], review[1])];
+    let lua = [
+        pill_rule(width, height, top),
+        picker_rule(),
+        review_rule(review[0], review[1]),
+        keep_alive_rule(),
+    ];
     for rule in &lua {
         let Err(error) = hypr_command(&format!("eval {rule}")) else {
             continue;
@@ -153,7 +161,8 @@ fn install_legacy_window_rules(pill: [f32; 3], review: [f32; 2]) {
     let [width, height, top] = pill;
     let legacy = legacy_pill_rules(width, height, top)
         .into_iter()
-        .chain(legacy_window_rules(review[0], review[1]));
+        .chain(legacy_window_rules(review[0], review[1]))
+        .chain(legacy_keep_alive_rules());
     for rule in legacy {
         if let Err(error) = hypr_command(&format!("keyword windowrulev2 {rule}")) {
             scrawl_log(format!("Hyprland rule {rule:?}: {error:#}"));
@@ -671,6 +680,21 @@ pub fn review_rule(width: f32, height: f32) -> String {
     )
 }
 
+/// The keep-alive window lives on a hidden special workspace, unfocusable, 1×1.
+pub fn keep_alive_rule() -> String {
+    format!(
+        "hl.window_rule({{ match = {{ class = \"^({KEEP_ALIVE_CLASS})$\" }}, float = true, \
+         no_focus = true, workspace = \"special:scrawl silent\", size = {{ \"1\", \"1\" }} }})"
+    )
+}
+
+/// `keep_alive_rule` for Hyprland before 0.53.
+pub fn legacy_keep_alive_rules() -> Vec<String> {
+    ["float", "nofocus", "workspace special:scrawl silent", "size 1 1"]
+        .map(|rule| format!("{rule}, class:^({KEEP_ALIVE_CLASS})$"))
+        .into()
+}
+
 /// `picker_rule` and `review_rule` for Hyprland before 0.53.
 pub fn legacy_window_rules(review_width: f32, review_height: f32) -> Vec<String> {
     let picker = [
@@ -890,6 +914,23 @@ mod tests {
                 "noblur, class:^(scrawl-pill)$",
                 "move ((monitor_w-520)/2) 34, class:^(scrawl-pill)$",
                 "size 520 84, class:^(scrawl-pill)$",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_keep_alive_window_is_out_of_sight() {
+        assert_eq!(
+            keep_alive_rule(),
+            r#"hl.window_rule({ match = { class = "^(scrawl-keep-alive)$" }, float = true, no_focus = true, workspace = "special:scrawl silent", size = { "1", "1" } })"#
+        );
+        assert_eq!(
+            legacy_keep_alive_rules(),
+            [
+                "float, class:^(scrawl-keep-alive)$",
+                "nofocus, class:^(scrawl-keep-alive)$",
+                "workspace special:scrawl silent, class:^(scrawl-keep-alive)$",
+                "size 1 1, class:^(scrawl-keep-alive)$",
             ]
         );
     }

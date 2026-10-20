@@ -27,7 +27,13 @@ cargo build --release
 ln -s "$PWD/target/release/scrawl" ~/.local/bin/scrawl
 ```
 
-In `hyprland.conf`:
+Bind the shortcut in Hyprland. With a Lua config (`hyprland.lua`, Hyprland 0.53 and later):
+
+```lua
+hl.bind("ALT + SHIFT + S", hl.dsp.exec_cmd("scrawl toggle"))
+```
+
+or in a `hyprland.conf`:
 
 ```
 bind = ALT SHIFT, S, exec, scrawl toggle
@@ -35,12 +41,39 @@ bind = ALT SHIFT, S, exec, scrawl toggle
 
 Press it to start and again to stop. The bundle lands in `~/.local/share/scrawl/captures/` and its
 summary on the clipboard; `scrawl send latest --session ses_…` delivers it to OpenCode. Not yet on
-Linux: ink, the menu-bar app, iPhone capture, video export.
+Linux: ink, iPhone capture, video export, the settings window.
 
-`scrawl app` runs the capsule on Linux too. `wf-recorder` records the whole output, so the capsule
-leaves the screen about 1.5 s into a recording (it never lands in the capture) and comes back for
-processing and the result: finish a recording with the shortcut. Untested so far: where the picker
-and capsule land with more than one monitor.
+### The app
+
+`scrawl app` is the long-running app with the capsule, the review window and a tray icon. Start it
+with Hyprland, in `autostart.lua`:
+
+```lua
+hl.on("hyprland.start", function ()
+    hl.exec_cmd("scrawl app")
+end)
+```
+
+(or `exec-once = scrawl app` in a `hyprland.conf`). While it runs, the same `scrawl toggle` bind
+drives it instead of starting a separate recorder, and a second `scrawl app` exits with a message.
+It listens on `$XDG_RUNTIME_DIR/scrawl/ctl.sock` (owner-only); `toggle`, `stop`, `cancel`, `review`
+and `quit` are its commands, one per line.
+
+- **Shortcut.** With read access to `/dev/input` (the `input` group, below), the app also sees the
+  shortcut itself. Tap it to record the screen, or keep Alt+Shift held after the S to open the
+  mode switcher (each further S steps to the next mode, letting go records it), and Esc closes
+  the switcher or the picker. A press seen
+  both there and through the bind counts once. The listener only compares each key with the
+  shortcut and Esc; it keeps nothing else.
+- **Capsule.** `wf-recorder` records the whole output, so the capsule leaves the screen about
+  1.5 s into a recording (it never lands in the capture) and comes back for processing and the
+  result. Finish a recording with the shortcut, `scrawl toggle` or the tray.
+- **Tray.** Record or Stop, Open Latest Capture and Quit Scrawl. It needs a StatusNotifierItem
+  host on the bar (waybar's `tray` module, Noctalia's bar); without one the app runs without it.
+- **Housekeeping.** gpui ends an app whose last window closes, so the app keeps an empty 1×1
+  window on the hidden special workspace `special:scrawl`.
+
+Untested so far: where the picker and capsule land with more than one monitor.
 
 While recording, Scrawl notes clicks, drags, scrolling and Ctrl/Super shortcuts (for example
 `Ctrl+L`) from the input devices, and the keyframes around them say "clicked ..." or "scrolled

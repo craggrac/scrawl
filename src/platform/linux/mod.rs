@@ -12,7 +12,9 @@ pub mod tray;
 
 use std::path::Path;
 
-pub use self::session::{ScreenCaptureSession, discard_screen_session, start_screen_session};
+pub use self::session::{
+    ScreenCaptureSession, discard_screen_session, recorders_running, start_screen_session,
+};
 pub use self::shortcut::{PressSource, ShortcutConfig, shortcut_from_key_and_mods};
 pub use self::standins::{MetalLaserOverlay, NativePill, PhoneSession, PillAction};
 pub use self::telemetry::SharedCaptureTelemetry;

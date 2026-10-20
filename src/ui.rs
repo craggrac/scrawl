@@ -430,16 +430,27 @@ fn island_content_width(
     inner + 2.0 * ISLAND_INSET
 }
 
-#[cfg(target_os = "macos")]
+/// The status menu's items (the tray on Linux), and the Linux control socket's `stop`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum MenuAction {
     ToggleCapture,
+    #[cfg(target_os = "macos")]
     ChooseTarget,
     OpenLatest,
+    #[cfg(target_os = "macos")]
     OpenInbox(PathBuf),
+    #[cfg(target_os = "macos")]
     ExportVideo,
+    #[cfg(target_os = "macos")]
     Settings,
+    #[cfg(target_os = "macos")]
     CheckForUpdates,
+    /// Finish the recording if one runs (the control socket's `stop`).
+    #[cfg(target_os = "linux")]
+    Stop,
+    /// Throw away the recording or the picker (the control socket's `cancel`).
+    #[cfg(target_os = "linux")]
+    Cancel,
     Quit,
 }
 
@@ -5454,57 +5465,7 @@ pub fn run_app(
                     }
                     if let Some(ref rx) = menu_rx {
                         while let Ok(action) = rx.try_recv() {
-                            match action {
-                                MenuAction::ToggleCapture => {
-                                    loop_coord.update(cx, |coord, cx| coord.record_or_finish(cx));
-                                }
-                                MenuAction::ChooseTarget => {
-                                    loop_coord.update(cx, |coord, cx| {
-                                        if !coord.is_recording()
-                                            && !coord.is_processing()
-                                            && !coord.is_selecting()
-                                        {
-                                            coord.begin_target_selection(cx);
-                                        }
-                                    });
-                                }
-                                MenuAction::OpenLatest => {
-                                    if let Ok((dir, bundle)) =
-                                        crate::handoff::load_bundle(std::path::Path::new("latest"))
-                                    {
-                                        loop_coord.update(cx, |coord, cx| {
-                                            coord.mark_handled(&dir);
-                                            coord.set_review_bundle((dir, bundle), None);
-                                            cx.notify();
-                                        });
-                                        open_review_window(&loop_coord, cx);
-                                    }
-                                }
-                                MenuAction::OpenInbox(path) => {
-                                    let loaded = crate::handoff::load_bundle(&path).ok();
-                                    let opened = loaded.is_some();
-                                    loop_coord.update(cx, |coord, cx| {
-                                        coord.mark_handled(&path);
-                                        if let Some(bundle) = loaded {
-                                            coord.set_review_bundle(bundle, None);
-                                        }
-                                        cx.notify();
-                                    });
-                                    if opened {
-                                        open_review_window(&loop_coord, cx);
-                                    }
-                                }
-                                MenuAction::ExportVideo => start_video_export(),
-                                MenuAction::Settings => {
-                                    loop_coord.update(cx, |coord, _| coord.open_settings(None));
-                                }
-                                MenuAction::CheckForUpdates => {
-                                    crate::sparkle::check_for_updates();
-                                }
-                                MenuAction::Quit => {
-                                    should_quit = true;
-                                }
-                            }
+                            should_quit |= act_on_menu(action, &loop_coord, cx);
                         }
                     }
 
@@ -5543,6 +5504,172 @@ pub fn run_app(
         .detach();
     });
 }
+
+/// Does what a status menu item (or a control socket command) asks; `true` for Quit.
+fn act_on_menu(action: MenuAction, coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) -> bool {
+    match action {
+        MenuAction::ToggleCapture => {
+            coord_entity.update(cx, |coord, cx| coord.record_or_finish(cx));
+        }
+        #[cfg(target_os = "macos")]
+        MenuAction::ChooseTarget => {
+            coord_entity.update(cx, |coord, cx| {
+                if !coord.is_recording()
+                    && !coord.is_processing()
+                    && !coord.is_selecting()
+                {
+                    coord.begin_target_selection(cx);
+                }
+            });
+        }
+        MenuAction::OpenLatest => {
+            if let Ok((dir, bundle)) =
+                crate::handoff::load_bundle(std::path::Path::new("latest"))
+            {
+                coord_entity.update(cx, |coord, cx| {
+                    coord.mark_handled(&dir);
+                    coord.set_review_bundle((dir, bundle), None);
+                    cx.notify();
+                });
+                open_review_window(coord_entity, cx);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        MenuAction::OpenInbox(path) => {
+            let loaded = crate::handoff::load_bundle(&path).ok();
+            let opened = loaded.is_some();
+            coord_entity.update(cx, |coord, cx| {
+                coord.mark_handled(&path);
+                if let Some(bundle) = loaded {
+                    coord.set_review_bundle(bundle, None);
+                }
+                cx.notify();
+            });
+            if opened {
+                open_review_window(coord_entity, cx);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        MenuAction::ExportVideo => start_video_export(),
+        #[cfg(target_os = "macos")]
+        MenuAction::Settings => {
+            coord_entity.update(cx, |coord, _| coord.open_settings(None));
+        }
+        #[cfg(target_os = "macos")]
+        MenuAction::CheckForUpdates => {
+            crate::sparkle::check_for_updates();
+        }
+        #[cfg(target_os = "linux")]
+        MenuAction::Stop => {
+            coord_entity.update(cx, |coord, cx| {
+                if coord.is_recording() {
+                    coord.finish_recording(cx);
+                }
+            });
+        }
+        #[cfg(target_os = "linux")]
+        MenuAction::Cancel => {
+            coord_entity.update(cx, |coord, cx| {
+                if coord.is_recording() || coord.is_selecting() {
+                    coord.cancel_recording(cx);
+                }
+            });
+        }
+        MenuAction::Quit => return true,
+    }
+    false
+}
+
+/// `scrawl app` on Linux, beyond the windows: the control socket (`scrawl toggle` and the
+/// other commands), the tray, and the shortcut listener. Commands and tray clicks arrive as
+/// `MenuAction`s, except `toggle`, which is a press of the capture shortcut.
+#[cfg(target_os = "linux")]
+fn start_linux_app(
+    listener: std::os::unix::net::UnixListener,
+    telemetry: &Arc<SharedCaptureTelemetry>,
+) -> (
+    flume::Receiver<MenuAction>,
+    Option<crate::platform::tray::Tray>,
+) {
+    use crate::linux::control::Command;
+    use crate::platform::tray::{Tray, TrayItem};
+    let (menu_tx, menu_rx) = flume::unbounded();
+    start_global_input_tap(Arc::clone(telemetry));
+    let socket_telemetry = Arc::clone(telemetry);
+    let socket_tx = menu_tx.clone();
+    crate::linux::control::serve(listener, move |command| {
+        let action = match command {
+            Command::Toggle => {
+                socket_telemetry.press_shortcut_from(crate::platform::PressSource::Socket);
+                return Ok(());
+            }
+            Command::Stop => MenuAction::Stop,
+            Command::Cancel => MenuAction::Cancel,
+            Command::Review => MenuAction::OpenLatest,
+            Command::Quit => MenuAction::Quit,
+        };
+        socket_tx
+            .send(action)
+            .map_err(|_| "Scrawl is quitting".to_owned())
+    });
+    let shortcut = telemetry
+        .shortcut
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .label
+        .clone();
+    let tray = Tray::start(shortcut, move |item| {
+        let _ = menu_tx.send(match item {
+            TrayItem::Record => MenuAction::ToggleCapture,
+            TrayItem::OpenLatest => MenuAction::OpenLatest,
+            TrayItem::Quit => MenuAction::Quit,
+        });
+    });
+    (menu_rx, tray)
+}
+
+/// An empty 1×1 window that is always open while `scrawl app` runs on Linux: gpui's Wayland
+/// client ends the app when its last window closes, and the capsule closes between captures
+/// (and during one). Hyprland keeps it on a hidden special workspace (`hypr::keep_alive_rule`).
+#[cfg(target_os = "linux")]
+struct KeepAliveWindow;
+
+#[cfg(target_os = "linux")]
+impl Render for KeepAliveWindow {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_keep_alive_window(cx: &mut App) {
+    let opened = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin: Point::default(),
+                size: size(px(1.0), px(1.0)),
+            })),
+            titlebar: None,
+            focus: false,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            window_background: WindowBackgroundAppearance::Transparent,
+            app_id: Some(crate::linux::hypr::KEEP_ALIVE_CLASS.into()),
+            ..Default::default()
+        },
+        |_, cx| cx.new(|_| KeepAliveWindow),
+    );
+    if let Err(error) = opened {
+        scrawl_log(format!("Keep-alive window: {error:#}; Scrawl quits with its last window"));
+    }
+}
+
+/// How long quitting waits for a cancelled recording's `wf-recorder` to stop.
+#[cfg(target_os = "linux")]
+const QUIT_WAIT: Duration = Duration::from_secs(6);
 
 /// How long the capsule shows after a Linux recording starts: `wf-recorder` records the whole
 /// output, so the capsule then leaves the screen (finishing is by the shortcut) and comes back
@@ -5609,6 +5736,18 @@ pub fn run_app(
     start_iphone_immediately: bool,
     screenshot_out: Option<PathBuf>,
 ) {
+    // `scrawl app` itself, not a preview or a screenshot: one per user.
+    let control = if initial_bundle.is_none() && screenshot_out.is_none() {
+        match crate::linux::control::bind() {
+            Ok((listener, path)) => Some((listener, path)),
+            Err(error) => {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
     let app = Application::new().with_assets(crate::icons::Assets);
     app.run(move |cx: &mut App| {
         scrawl_log(format!("run_app started pid={}", std::process::id()));
@@ -5620,7 +5759,14 @@ pub fn run_app(
         let (ui_sender, ui_receiver) = flume::unbounded();
         let telemetry = SharedCaptureTelemetry::new(ui_sender);
         install_global_hotkeys(&telemetry);
-        start_global_input_tap(Arc::clone(&telemetry));
+        let (socket_path, menu_rx, mut tray) = match control {
+            Some((listener, path)) => {
+                open_keep_alive_window(cx);
+                let (menu_rx, tray) = start_linux_app(listener, &telemetry);
+                (Some(path), Some(menu_rx), tray)
+            }
+            None => (None, None, None),
+        };
         let has_initial = initial_bundle.is_some();
         let coordinator = cx.new(|_| ScrawlCoordinator::new(telemetry, initial_bundle));
         set_status_inbox_count(coordinator.read(cx).inbox.len());
@@ -5653,11 +5799,38 @@ pub fn run_app(
 
         let loop_coord = coordinator.clone();
         cx.spawn(async move |cx| {
+            let mut quitting: Option<Instant> = None;
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(8))
                     .await;
                 let _ = cx.update(|cx| {
+                    if let Some(rx) = &menu_rx {
+                        while let Ok(action) = rx.try_recv() {
+                            if act_on_menu(action, &loop_coord, cx) && quitting.is_none() {
+                                // A recording is thrown away and its recorder stopped first,
+                                // or `wf-recorder` would outlive the app.
+                                loop_coord.update(cx, |coord, cx| {
+                                    if coord.is_recording() {
+                                        coord.cancel_recording(cx);
+                                    }
+                                });
+                                quitting = Some(Instant::now());
+                            }
+                        }
+                    }
+                    if let Some(tray) = tray.as_mut() {
+                        let coord = loop_coord.read(cx);
+                        tray.set_recording(coord.is_recording());
+                        tray.set_shortcut(
+                            &coord
+                                .telemetry
+                                .shortcut
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .label,
+                        );
+                    }
                     let mut should_open_pill = false;
                     while let Ok(ev) = ui_receiver.try_recv() {
                         should_open_pill |= loop_coord.update(cx, |coord, cx| coord.handle_event(ev, cx));
@@ -5679,6 +5852,15 @@ pub fn run_app(
                         loop_coord.update(cx, |coord, cx| coord.island_tick(cx));
                     }
                 });
+                if quitting.is_some_and(|since| {
+                    !crate::platform::recorders_running() || since.elapsed() >= QUIT_WAIT
+                }) {
+                    if let Some(path) = &socket_path {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    let _ = cx.update(|cx| cx.quit());
+                    break;
+                }
             }
         })
         .detach();
