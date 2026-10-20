@@ -20,6 +20,9 @@ use crate::capture::scrawl_log;
 use crate::handoff;
 use crate::model::CaptureMode;
 
+/// How long the "Recording" notification stays: it lands in the first frames.
+const START_NOTICE_MS: u32 = 1_500;
+
 static STOP: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_stop_signal(_: libc::c_int) {
@@ -53,9 +56,18 @@ fn wait_for_stop(duration: u64, until_stopped: bool) {
 
 /// Desktop notification; failures (no `notify-send`) are ignored.
 pub fn notify(text: &str) {
-    let _ = std::process::Command::new("notify-send")
-        .args(["-a", "Scrawl", "Scrawl", text])
-        .spawn();
+    notify_for(text, None);
+}
+
+/// A notification that closes after `ms`, for the one shown while recording: it is on screen,
+/// so it lands in the capture, which macOS keeps its own UI out of.
+fn notify_for(text: &str, ms: Option<u32>) {
+    let mut command = std::process::Command::new("notify-send");
+    command.args(["-a", "Scrawl"]);
+    if let Some(ms) = ms {
+        command.args(["-t", &ms.to_string(), "-h", "int:transient:1"]);
+    }
+    let _ = command.args(["Scrawl", text]).spawn();
 }
 
 /// Records the focused monitor (or `window`) with the microphone into a `.scrawl` bundle, then
@@ -136,11 +148,14 @@ fn capture_into(
             hypr::WindowLogger::start(target.frame, started_at, Arc::clone(&request))
         });
         let input = input::InputRecorder::start(target.frame, started_at, request);
-        notify(&if until_stopped {
-            "Recording. Press the shortcut again to stop.".to_owned()
-        } else {
-            format!("Recording for {} s.", duration.max(1))
-        });
+        notify_for(
+            &if until_stopped {
+                "Recording. Press the shortcut again to stop.".to_owned()
+            } else {
+                format!("Recording for {} s.", duration.max(1))
+            },
+            Some(START_NOTICE_MS),
+        );
         wait_for_stop(duration, until_stopped);
         restore_default_signals();
         toggle::clear_pidfile();
