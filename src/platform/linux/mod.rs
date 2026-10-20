@@ -12,13 +12,14 @@ mod telemetry;
 use std::path::Path;
 
 pub use self::session::{ScreenCaptureSession, discard_screen_session, start_screen_session};
-pub use self::shortcut::{ShortcutConfig, shortcut_from_key_and_mods};
+pub use self::shortcut::{PressSource, ShortcutConfig, shortcut_from_key_and_mods};
 pub use self::standins::{MetalLaserOverlay, NativePill, PhoneSession, PillAction};
 pub use self::telemetry::SharedCaptureTelemetry;
 use crate::capture::scrawl_log;
 pub use crate::capture::{selectable_window_at, shortcut_parts};
 pub use crate::linux::hypr::{
-    WindowLogger, frontmost_app_info, list_selectable_windows, target_under_point as discover_target_at,
+    WindowLogger, frontmost_app_info, list_selectable_windows,
+    target_under_point as discover_target_at,
 };
 use crate::model::TargetInfo;
 
@@ -74,20 +75,33 @@ pub fn region_target(
 /// Nothing to remember: `frontmost_app_info` reads Hyprland's focus history.
 pub fn record_external_frontmost_app() {}
 
-/// No modifier state is read yet, so a held shortcut counts as released at once: the capture
-/// shortcut is a tap that records the screen (hold-to-switch needs the evdev key-up, task 4).
+/// The modifiers held now, as `linux::hotkey` last saw them (0 when it isn't running, so a
+/// held shortcut then counts as a tap).
 pub fn modifier_flags() -> u64 {
-    0
+    crate::linux::hotkey::modifier_bits()
 }
 
-/// Esc reaches Scrawl's own windows only.
+/// Esc comes from `start_global_input_tap`'s listener whenever it runs.
 pub fn set_escape_hotkey_enabled(_enabled: bool) {}
 
 /// The capture shortcut is a Hyprland bind (`scrawl toggle`), not a hotkey Scrawl registers.
 pub fn install_global_hotkeys(_telemetry: &std::sync::Arc<SharedCaptureTelemetry>) {}
 
-/// Input is recorded per capture (`linux::input::InputRecorder`), not by a global tap.
-pub fn start_global_input_tap(_telemetry: std::sync::Arc<SharedCaptureTelemetry>) {}
+/// Listens to the evdev keyboards for the app's lifetime: the capture shortcut's presses (with
+/// the modifiers, so holding it opens the switcher) and Esc. Clicks and keys for a capture are
+/// recorded separately, per capture (`linux::input::InputRecorder`).
+pub fn start_global_input_tap(telemetry: std::sync::Arc<SharedCaptureTelemetry>) {
+    use crate::linux::hotkey::{self, KeyAction};
+    let matcher = std::sync::Arc::clone(&telemetry);
+    hotkey::start(
+        move |code, cmd, ctrl, alt, shift| matcher.matches_shortcut(code, cmd, ctrl, alt, shift),
+        move |action| match action {
+            KeyAction::Shortcut => telemetry.press_shortcut_from(PressSource::Keys),
+            KeyAction::Escape => telemetry.note_escape(),
+            KeyAction::None => {}
+        },
+    );
+}
 
 /// The record shortcut recorded in the review window. It only renames the shortcut here: the
 /// key itself is the Hyprland bind, which Scrawl doesn't edit.

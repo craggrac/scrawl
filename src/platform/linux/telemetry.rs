@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use super::ShortcutConfig;
+use super::shortcut::{PressGate, PressSource};
 use crate::capture::LiveOverlayEvent;
 use crate::linux::input::InputRecorder;
 use crate::model::{CaptureMode, InteractionEvent, Stroke, TargetFrame};
@@ -40,6 +41,8 @@ pub struct SharedCaptureTelemetry {
     capture_mode: Mutex<CaptureMode>,
     picker_rect: Mutex<Option<([f32; 4], u8)>>,
     escape: AtomicBool,
+    /// Lets a key press seen by both the listener and the bind act once.
+    press_gate: Mutex<(Instant, PressGate)>,
     input: Mutex<Option<InputRecorder>>,
     session_events: Mutex<Option<EventSlot>>,
 }
@@ -69,6 +72,7 @@ impl SharedCaptureTelemetry {
             capture_mode: Mutex::new(CaptureMode::Display),
             picker_rect: Mutex::new(None),
             escape: AtomicBool::new(false),
+            press_gate: Mutex::new((Instant::now(), PressGate::default())),
             input: Mutex::new(None),
             session_events: Mutex::new(None),
         })
@@ -77,6 +81,26 @@ impl SharedCaptureTelemetry {
     /// The record shortcut, from wherever it was seen.
     pub fn emit_capture_shortcut(&self) {
         let _ = self.ui_sender.try_send(LiveOverlayEvent::CaptureShortcut);
+    }
+
+    /// The record shortcut as `source` saw it; the second sighting of one press is dropped.
+    pub fn press_shortcut_from(&self, source: PressSource) {
+        let accepted = {
+            let mut gate = self
+                .press_gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let now_ms = u64::try_from(gate.0.elapsed().as_millis()).unwrap_or(u64::MAX);
+            gate.1.accept(source, now_ms)
+        };
+        if accepted {
+            self.emit_capture_shortcut();
+        }
+    }
+
+    /// Esc went down, in whichever app (`linux::hotkey`).
+    pub fn note_escape(&self) {
+        self.escape.store(true, Ordering::Release);
     }
 
     pub fn matches_shortcut(
@@ -156,7 +180,7 @@ impl SharedCaptureTelemetry {
             .unwrap_or_else(PoisonError::into_inner) = Some(slot);
     }
 
-    /// Esc went down since the last look. Esc is only seen by Scrawl's own windows here.
+    /// Esc went down since the last look (`note_escape`).
     pub fn take_escape(&self) -> bool {
         self.escape.swap(false, Ordering::AcqRel)
     }

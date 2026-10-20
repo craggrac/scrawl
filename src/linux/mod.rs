@@ -2,6 +2,7 @@
 //! the headless recording flow a Hyprland key bind drives through `scrawl toggle`.
 
 pub mod control;
+pub mod hotkey;
 pub mod hypr;
 pub mod input;
 pub mod media;

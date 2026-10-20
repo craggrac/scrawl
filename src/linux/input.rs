@@ -17,15 +17,15 @@ use std::time::Instant;
 use crate::capture::scrawl_log;
 use crate::model::{InteractionEvent, TargetFrame};
 
-const EV_KEY: u16 = 0x01;
+pub(crate) const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
 const REL_HWHEEL: u16 = 0x06;
 const REL_WHEEL: u16 = 0x08;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const KEY_A: u16 = 30;
-const EV_SYN: u16 = 0x00;
-const SYN_DROPPED: u16 = 3;
+pub(crate) const EV_SYN: u16 = 0x00;
+pub(crate) const SYN_DROPPED: u16 = 3;
 const KEY_LEFTCTRL: u16 = 29;
 const KEY_RIGHTCTRL: u16 = 97;
 const KEY_LEFTSHIFT: u16 = 42;
@@ -76,7 +76,7 @@ impl Layout {
 /// Left and right modifiers are tracked apart so letting go of one while the other is held
 /// leaves the modifier held.
 #[derive(Clone, Copy, Debug, Default)]
-struct Modifiers {
+pub(crate) struct Modifiers {
     left_ctrl: bool,
     right_ctrl: bool,
     left_alt: bool,
@@ -89,7 +89,7 @@ struct Modifiers {
 
 impl Modifiers {
     /// Updates for a modifier key; `false` if `code` is not one.
-    fn set(&mut self, code: u16, down: bool) -> bool {
+    pub(crate) fn set(&mut self, code: u16, down: bool) -> bool {
         let slot = match code {
             KEY_LEFTCTRL => &mut self.left_ctrl,
             KEY_RIGHTCTRL => &mut self.right_ctrl,
@@ -105,19 +105,19 @@ impl Modifiers {
         true
     }
 
-    fn ctrl(&self) -> bool {
+    pub(crate) fn ctrl(&self) -> bool {
         self.left_ctrl || self.right_ctrl
     }
 
-    fn alt(&self) -> bool {
+    pub(crate) fn alt(&self) -> bool {
         self.left_alt || self.right_alt
     }
 
-    fn shift(&self) -> bool {
+    pub(crate) fn shift(&self) -> bool {
         self.left_shift || self.right_shift
     }
 
-    fn meta(&self) -> bool {
+    pub(crate) fn meta(&self) -> bool {
         self.left_meta || self.right_meta
     }
 }
@@ -459,7 +459,7 @@ fn wanted(file: &File) -> bool {
 }
 
 /// Every readable pointer or keyboard under `/dev/input`; the others are skipped.
-fn open_devices() -> Vec<File> {
+pub(crate) fn open_devices() -> Vec<File> {
     let Ok(entries) = std::fs::read_dir("/dev/input") else {
         return Vec::new();
     };
@@ -502,7 +502,7 @@ pub fn decode_events(buf: &[u8]) -> Vec<RawEvent> {
 }
 
 /// Waits up to `timeout_ms` for any device to have data; the indexes of the readable ones.
-fn poll_readable(devices: &[File], timeout_ms: i32) -> Vec<usize> {
+pub(crate) fn poll_readable(devices: &[File], timeout_ms: i32) -> Vec<usize> {
     let mut fds: Vec<libc::pollfd> = devices
         .iter()
         .map(|d| libc::pollfd {
@@ -523,7 +523,7 @@ fn poll_readable(devices: &[File], timeout_ms: i32) -> Vec<usize> {
 }
 
 /// Reads what is pending on one device. `None` when the device is gone.
-fn drain(device: &mut File) -> Option<Vec<RawEvent>> {
+pub(crate) fn drain(device: &mut File) -> Option<Vec<RawEvent>> {
     let mut out = Vec::new();
     let mut buf = [0u8; EVENT_SIZE * 64];
     loop {

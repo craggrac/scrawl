@@ -63,6 +63,43 @@ pub fn shortcut_from_key_and_mods(
     })
 }
 
+/// Where a press of the capture shortcut was seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PressSource {
+    /// The evdev listener (`linux::hotkey`), which also sees the hold.
+    Keys,
+    /// `scrawl toggle` on the control socket, from the Hyprland bind (or a script).
+    Socket,
+}
+
+/// One key press can arrive twice: the listener reads it from evdev and the Hyprland bind
+/// runs `scrawl toggle`. A press from one source within this long after an unpaired press
+/// from the other is that same press.
+pub const SAME_PRESS_MS: u64 = 1_000;
+
+/// Lets each physical press act once, whichever way it arrives first.
+#[derive(Debug, Default)]
+pub struct PressGate {
+    /// The last press that acted, when, and whether its twin has been dropped already.
+    last: Option<(PressSource, u64, bool)>,
+}
+
+impl PressGate {
+    /// Whether a press from `source` at `now_ms` should act.
+    pub fn accept(&mut self, source: PressSource, now_ms: u64) -> bool {
+        if let Some((last, at, paired)) = &mut self.last
+            && *last != source
+            && !*paired
+            && now_ms.saturating_sub(*at) < SAME_PRESS_MS
+        {
+            *paired = true;
+            return false;
+        }
+        self.last = Some((source, now_ms, false));
+        true
+    }
+}
+
 /// Modifier symbols in the order macOS writes them: ⌃⌥⇧⌘.
 fn modifier_symbols(cmd: bool, ctrl: bool, alt: bool, shift: bool) -> String {
     [(ctrl, '⌃'), (alt, '⌥'), (shift, '⇧'), (cmd, '⌘')]
@@ -92,6 +129,30 @@ mod tests {
         assert_eq!((f5.label.as_str(), f5.key_code), ("F5", 0xF005));
         assert!(shortcut_from_key_and_mods("s", false, false, false, true).is_none());
         assert!(shortcut_from_key_and_mods("enter", false, true, false, false).is_none());
+    }
+
+    #[test]
+    fn a_press_seen_by_both_the_keys_and_the_bind_acts_once() {
+        use PressSource::{Keys, Socket};
+        let mut gate = PressGate::default();
+        // evdev first, the bind's `scrawl toggle` 30 ms later.
+        assert!(gate.accept(Keys, 0));
+        assert!(!gate.accept(Socket, 30));
+        // Held ⌥⇧, S again: the next pair.
+        assert!(gate.accept(Keys, 200));
+        assert!(!gate.accept(Socket, 230));
+        // The bind first this time: the listener's copy is the twin, and a later S counts.
+        assert!(gate.accept(Socket, 5_000));
+        assert!(!gate.accept(Keys, 5_010));
+        assert!(gate.accept(Keys, 5_300));
+        assert!(!gate.accept(Socket, 5_320));
+        // Only one source (no bind, or no input group): every press acts.
+        assert!(gate.accept(Socket, 9_000));
+        assert!(gate.accept(Socket, 9_100));
+        assert!(gate.accept(Keys, 20_000));
+        assert!(gate.accept(Keys, 20_100));
+        // A deliberate `scrawl toggle` well after a key press acts.
+        assert!(gate.accept(Socket, 21_200));
     }
 
     #[test]
