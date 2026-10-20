@@ -683,11 +683,12 @@ pub fn legacy_pill_rules(width: f32, height: f32, top: f32) -> Vec<String> {
     .collect()
 }
 
-/// The picker's window covers its whole monitor, pinned, with nothing drawn around it.
+/// The picker's window covers its whole monitor, pinned, with nothing drawn around it. Its
+/// corners are square too: the session's rounding would leave the four screen corners undimmed.
 pub fn picker_rule() -> String {
     format!(
         "hl.window_rule({{ match = {{ class = \"^({PICKER_CLASS})$\" }}, float = true, pin = true, \
-         border_size = 0, no_shadow = true, no_blur = true, no_anim = true, \
+         border_size = 0, rounding = 0, no_shadow = true, no_blur = true, no_anim = true, \
          move = {{ \"0\", \"0\" }}, size = {{ \"monitor_w\", \"monitor_h\" }} }})"
     )
 }
@@ -721,6 +722,7 @@ pub fn legacy_window_rules(review_width: f32, review_height: f32) -> Vec<String>
         "float",
         "pin",
         "bordersize 0",
+        "rounding 0",
         "noshadow",
         "noblur",
         "noanim",
@@ -966,7 +968,7 @@ mod tests {
     fn picker_covers_its_monitor_and_review_floats_centred() {
         assert_eq!(
             picker_rule(),
-            r#"hl.window_rule({ match = { class = "^(scrawl-picker)$" }, float = true, pin = true, border_size = 0, no_shadow = true, no_blur = true, no_anim = true, move = { "0", "0" }, size = { "monitor_w", "monitor_h" } })"#
+            r#"hl.window_rule({ match = { class = "^(scrawl-picker)$" }, float = true, pin = true, border_size = 0, rounding = 0, no_shadow = true, no_blur = true, no_anim = true, move = { "0", "0" }, size = { "monitor_w", "monitor_h" } })"#
         );
         assert_eq!(
             review_rule(1120.0, 740.0),
@@ -978,6 +980,7 @@ mod tests {
                 "float, class:^(scrawl-picker)$",
                 "pin, class:^(scrawl-picker)$",
                 "bordersize 0, class:^(scrawl-picker)$",
+                "rounding 0, class:^(scrawl-picker)$",
                 "noshadow, class:^(scrawl-picker)$",
                 "noblur, class:^(scrawl-picker)$",
                 "noanim, class:^(scrawl-picker)$",
