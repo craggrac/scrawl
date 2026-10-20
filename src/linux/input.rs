@@ -155,7 +155,7 @@ impl Gestures {
     }
 
     /// Forgets held modifiers and a pending press: their release may have been missed (a
-    /// dropped device or `SYN_DROPPED`), and a modifier stuck down would make plain typing
+    /// dropped device), and a modifier stuck down would make plain typing
     /// look like shortcuts.
     pub fn reset(&mut self) {
         self.mods = Modifiers::default();
@@ -196,8 +196,10 @@ impl Gestures {
         match raw.kind {
             EV_KEY => self.key(t, raw, cursor),
             EV_REL => self.rel(t, raw, cursor),
+            // Only the modifiers: a lost release there would turn typing into shortcuts. A
+            // press survives, since a lost release is replaced at the next press anyway.
             EV_SYN if raw.code == SYN_DROPPED => {
-                self.reset();
+                self.mods = Modifiers::default();
                 Vec::new()
             }
             _ => Vec::new(),
