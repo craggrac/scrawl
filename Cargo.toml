@@ -37,6 +37,7 @@ screencapturekit = { version = "=11.0.0", features = ["macos_15_0"] }
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland"] }
 ab_glyph = "0.2.32"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }
 
 [profile.dev]
 debug = 0

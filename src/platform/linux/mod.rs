@@ -8,6 +8,7 @@ mod session;
 mod shortcut;
 mod standins;
 mod telemetry;
+pub mod tray;
 
 use std::path::Path;
 
