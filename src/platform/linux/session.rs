@@ -4,6 +4,7 @@
 //! recorder when the capture finishes.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -20,6 +21,8 @@ pub struct ScreenCaptureSession {
     /// Starting `wf-recorder` waits for its first frame (up to seconds on a still screen), so
     /// it happens off the UI thread.
     recorder: Option<JoinHandle<Option<record::ScreenSession>>>,
+    /// Set by `discard_screen_session`: a start still waiting gives up at once.
+    cancel: Arc<AtomicBool>,
     events: EventSlot,
 }
 
@@ -37,16 +40,25 @@ pub fn start_screen_session(
         .unwrap_or_else(PoisonError::into_inner);
     let events: EventSlot = Arc::new(Mutex::new(None));
     telemetry.hand_events_to(Arc::clone(&events));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let thread_cancel = Arc::clone(&cancel);
     let recorder = video.clone().and_then(|path| {
         std::thread::Builder::new()
             .name("scrawl-wf-recorder".into())
             .spawn(move || {
-                record::ScreenSession::start(&target, &path, started_at)
+                record::ScreenSession::start_cancellable(&target, &path, started_at, &thread_cancel)
                     .inspect_err(|error| {
-                        scrawl_log(format!("Screen recording failed to start: {error:#}"));
-                        crate::linux::notify(&format!("Screen recording failed: {error:#}"));
+                        if error.is::<record::Cancelled>() {
+                            scrawl_log("Screen recording cancelled while starting");
+                        } else {
+                            scrawl_log(format!("Screen recording failed to start: {error:#}"));
+                            crate::linux::notify(&format!("Screen recording failed: {error:#}"));
+                        }
                     })
                     .ok()
+            })
+            .inspect_err(|error| {
+                scrawl_log(format!("Could not start the recorder thread: {error}"))
             })
             .ok()
     });
@@ -54,6 +66,7 @@ pub fn start_screen_session(
         started_at,
         video,
         recorder,
+        cancel,
         events,
     }
 }
@@ -61,9 +74,14 @@ pub fn start_screen_session(
 /// Ends a recording whose bundle is about to be deleted, without decoding anything (dropping
 /// `wf-recorder`'s session stops it).
 pub fn discard_screen_session(session: ScreenCaptureSession) {
+    session.cancel.store(true, Ordering::Release);
     if let Some(recorder) = session.recorder {
-        // It may still be waiting for its first frame; don't hold the UI for that.
-        std::thread::spawn(move || drop(recorder.join()));
+        // A recorder already running is stopped as it drops, off the UI thread.
+        std::thread::spawn(move || {
+            if recorder.join().is_err() {
+                scrawl_log("The recorder thread panicked");
+            }
+        });
     }
 }
 
@@ -84,7 +102,13 @@ impl ScreenCaptureSession {
             .unwrap_or_default();
         let stopped = self
             .recorder
-            .and_then(|recorder| recorder.join().ok().flatten())
+            .and_then(|recorder| {
+                recorder
+                    .join()
+                    .inspect_err(|_| scrawl_log("The recorder thread panicked"))
+                    .ok()
+                    .flatten()
+            })
             .map(|recorder| recorder.stop(&events));
         match stopped {
             Some(Ok(recording)) => recording,
@@ -92,9 +116,14 @@ impl ScreenCaptureSession {
                 if let Some(Err(error)) = failed {
                     scrawl_log(format!("Screen recording: {error:#}"));
                 }
-                let video = self
-                    .video
-                    .filter(|path| path.metadata().is_ok_and(|m| m.len() > 0));
+                // A video ffprobe can't read is no use to the bundle.
+                let video = self.video.filter(|path| {
+                    let readable = crate::helper::probe(path).is_ok();
+                    if !readable {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    readable
+                });
                 ScreenRecording {
                     frames: vec![crate::render::render_synthetic_demo_frame(1280, 800, 0, 0)],
                     video,

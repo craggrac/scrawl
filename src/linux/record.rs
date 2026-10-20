@@ -6,6 +6,7 @@ use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -158,13 +159,41 @@ fn quit_error(child: &mut Child, status: ExitStatus) -> anyhow::Error {
     anyhow::anyhow!("wf-recorder quit ({status}): {}", message.trim())
 }
 
+/// The start was cancelled (the capture was discarded while wf-recorder waited for its first
+/// frame); the recorder is already stopped.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the recording was cancelled while starting")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// Whether a failed NVENC start is worth retrying on x264: not once the capture is cancelled.
+fn retry_on_x264(error: &anyhow::Error) -> bool {
+    !error.is::<Cancelled>()
+}
+
 /// Waits for the first bytes and returns their capture-clock time in ms; `Err` with
 /// wf-recorder's complaint if it quit instead. On a screen that stays silent for
 /// `FIRST_FRAME_WAIT` it returns the time the recorder was started.
-fn wait_for_first_frame(child: &mut Child, video: &Path, started_at: Instant) -> Result<u64> {
+fn wait_for_first_frame(
+    child: &mut Child,
+    video: &Path,
+    started_at: Instant,
+    cancel: &AtomicBool,
+) -> Result<u64> {
     let spawned_ms = started_at.elapsed().as_millis() as u64;
     let deadline = Instant::now() + FIRST_FRAME_WAIT;
     while Instant::now() < deadline {
+        if cancel.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Cancelled.into());
+        }
         if let Some(status) = child.try_wait()? {
             return Err(quit_error(child, status));
         }
@@ -208,15 +237,30 @@ impl ScreenSession {
     /// Starts recording `target` into `video`, on NVENC when the GPU takes it, else x264.
     /// `started_at` is the capture clock's zero.
     pub fn start(target: &TargetInfo, video: &Path, started_at: Instant) -> Result<Self> {
+        Self::start_cancellable(target, video, started_at, &AtomicBool::new(false))
+    }
+
+    /// `start`, giving up (with `Cancelled`, the recorder killed and reaped) as soon as
+    /// `cancel` is set while it waits for the first frame; no x264 retry after that.
+    pub fn start_cancellable(
+        target: &TargetInfo,
+        video: &Path,
+        started_at: Instant,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
         let mut child = spawn(target, video, "h264_nvenc")?;
-        let video_offset_ms = match wait_for_first_frame(&mut child, video, started_at) {
+        let video_offset_ms = match wait_for_first_frame(&mut child, video, started_at, cancel) {
             Ok(ms) => ms,
+            Err(error) if !retry_on_x264(&error) => return Err(error),
             Err(error) => {
                 crate::capture::scrawl_log(format!("NVENC unavailable, using x264: {error:#}"));
                 let _ = child.kill();
                 let _ = child.wait();
+                if cancel.load(Ordering::Acquire) {
+                    return Err(Cancelled.into());
+                }
                 child = spawn(target, video, "libx264")?;
-                match wait_for_first_frame(&mut child, video, started_at) {
+                match wait_for_first_frame(&mut child, video, started_at, cancel) {
                     Ok(ms) => ms,
                     Err(error) => {
                         let _ = child.kill();
@@ -300,6 +344,30 @@ impl Drop for ScreenSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_start_stops_the_recorder_at_once() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let cancel = AtomicBool::new(true);
+        let began = Instant::now();
+        let error = wait_for_first_frame(
+            &mut child,
+            Path::new("/nonexistent/scrawl-test.mp4"),
+            Instant::now(),
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(error.is::<Cancelled>(), "{error:#}");
+        assert!(began.elapsed() < Duration::from_millis(500));
+        // Killed and reaped.
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn only_an_uncancelled_failure_falls_back_to_x264() {
+        assert!(retry_on_x264(&anyhow::anyhow!("NVENC: no device")));
+        assert!(!retry_on_x264(&anyhow::Error::new(Cancelled)));
+    }
 
     #[test]
     fn short_captures_sample_at_the_normal_interval() {
