@@ -14,8 +14,8 @@ pub use crate::capture::{
 pub use crate::handoff::native_pill;
 pub use crate::helper::devices as phone_devices;
 pub use crate::laser_overlay::MetalLaserOverlay;
-pub use crate::native::pill::NativePill;
 use crate::model::TargetInfo;
+pub use crate::native::pill::NativePill;
 pub use crate::phone::PhoneSession;
 pub use crate::windows::WindowLogger;
 

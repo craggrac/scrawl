@@ -22,7 +22,8 @@ impl ShortcutConfig {
     /// Whether a key (`key_code`) with these modifiers is this shortcut.
     pub fn matches(&self, key_code: u16, cmd: bool, ctrl: bool, alt: bool, shift: bool) -> bool {
         u32::from(key_code) == self.key_code
-            && crate::capture::shortcut_parts(&self.label).0 == modifier_symbols(cmd, ctrl, alt, shift)
+            && crate::capture::shortcut_parts(&self.label).0
+                == modifier_symbols(cmd, ctrl, alt, shift)
     }
 }
 

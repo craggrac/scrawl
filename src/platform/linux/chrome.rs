@@ -4,6 +4,7 @@
 //! back after the picker or the review window focuses the window that had them.
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use gpui::{App, Entity};
 
@@ -16,6 +17,10 @@ pub enum NativeWindow {}
 
 /// The capsule's Core Animation shell (macOS).
 pub enum ShellLayer {}
+
+/// How long `pointer_on_hud_pill`'s answer is reused.
+const POINTER_CHECK: Duration = Duration::from_millis(100);
+static LAST_POINTER_CHECK: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
 
 /// Hyprland's address of the window that had the keys before Scrawl took them.
 static PREVIOUS_FRONT_WINDOW: Mutex<Option<String>> = Mutex::new(None);
@@ -36,23 +41,33 @@ pub fn find_picker_ns_window() -> Option<NativeWindow> {
     None
 }
 
-/// Whether the pointer is over the capsule's window (its Hyprland client).
+/// Whether the pointer is over the capsule's window (its Hyprland client). The UI loop asks
+/// every few ms while the switch chips show, so an answer is reused for `POINTER_CHECK`.
 pub fn pointer_on_hud_pill() -> bool {
-    let Some([x, y]) = crate::screens::pointer() else {
-        return false;
-    };
-    hypr::clients().iter().any(|c| {
-        c.class == hypr::PILL_CLASS
-            && crate::screens::contains(
-                [
-                    f64::from(c.at[0]),
-                    f64::from(c.at[1]),
-                    f64::from(c.size[0]),
-                    f64::from(c.size[1]),
-                ],
-                [x, y],
-            )
-    })
+    let mut last = LAST_POINTER_CHECK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, on)) = *last
+        && at.elapsed() < POINTER_CHECK
+    {
+        return on;
+    }
+    let on = crate::screens::pointer().is_some_and(|[x, y]| {
+        hypr::clients().iter().any(|c| {
+            c.class == hypr::PILL_CLASS
+                && crate::screens::contains(
+                    [
+                        f64::from(c.at[0]),
+                        f64::from(c.at[1]),
+                        f64::from(c.size[0]),
+                        f64::from(c.size[1]),
+                    ],
+                    [x, y],
+                )
+        })
+    });
+    *last = Some((Instant::now(), on));
+    on
 }
 
 pub fn apply_pill_layer_effect(

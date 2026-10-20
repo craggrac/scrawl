@@ -31,7 +31,10 @@ pub fn start_screen_session(
     video: Option<PathBuf>,
     telemetry: &Arc<SharedCaptureTelemetry>,
 ) -> ScreenCaptureSession {
-    let started_at = *telemetry.started_at.lock().unwrap_or_else(PoisonError::into_inner);
+    let started_at = *telemetry
+        .started_at
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let events: EventSlot = Arc::new(Mutex::new(None));
     telemetry.hand_events_to(Arc::clone(&events));
     let recorder = video.clone().and_then(|path| {

@@ -15,8 +15,8 @@ pub use self::session::{ScreenCaptureSession, discard_screen_session, start_scre
 pub use self::shortcut::{ShortcutConfig, shortcut_from_key_and_mods};
 pub use self::standins::{MetalLaserOverlay, NativePill, PhoneSession, PillAction};
 pub use self::telemetry::SharedCaptureTelemetry;
-pub use crate::capture::{selectable_window_at, shortcut_parts};
 use crate::capture::scrawl_log;
+pub use crate::capture::{selectable_window_at, shortcut_parts};
 pub use crate::linux::hypr::{
     WindowLogger, discover_target_at, frontmost_app_info, list_selectable_windows,
 };
@@ -44,7 +44,13 @@ pub fn discover_target(window_query: Option<&str>) -> TargetInfo {
 }
 
 /// An area dragged in the picker, as a region target (`hypr::region_target_on`).
-pub fn region_target(x: f64, y: f64, width: f64, height: f64, windows: &[TargetInfo]) -> TargetInfo {
+pub fn region_target(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    windows: &[TargetInfo],
+) -> TargetInfo {
     crate::linux::hypr::region_target_on(
         &crate::screens::displays(),
         [x, y, width, height],
