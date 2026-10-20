@@ -80,22 +80,25 @@ pub const SAME_PRESS_MS: u64 = 1_000;
 /// Lets each physical press act once, whichever way it arrives first.
 #[derive(Debug, Default)]
 pub struct PressGate {
-    /// The last press that acted, when, and whether its twin has been dropped already.
-    last: Option<(PressSource, u64, bool)>,
+    /// Presses that acted and whose twin from the other source hasn't come yet, oldest first.
+    /// They are all from one source: a press from the other one pairs with the oldest.
+    unpaired: std::collections::VecDeque<(PressSource, u64)>,
 }
 
 impl PressGate {
     /// Whether a press from `source` at `now_ms` should act.
     pub fn accept(&mut self, source: PressSource, now_ms: u64) -> bool {
-        if let Some((last, at, paired)) = &mut self.last
-            && *last != source
-            && !*paired
-            && now_ms.saturating_sub(*at) < SAME_PRESS_MS
+        self.unpaired
+            .retain(|&(_, at)| now_ms.saturating_sub(at) < SAME_PRESS_MS);
+        if self
+            .unpaired
+            .front()
+            .is_some_and(|&(oldest, _)| oldest != source)
         {
-            *paired = true;
+            self.unpaired.pop_front();
             return false;
         }
-        self.last = Some((source, now_ms, false));
+        self.unpaired.push_back((source, now_ms));
         true
     }
 }
@@ -153,6 +156,14 @@ mod tests {
         assert!(gate.accept(Keys, 20_100));
         // A deliberate `scrawl toggle` well after a key press acts.
         assert!(gate.accept(Socket, 21_200));
+        // Two quick presses seen by the keys before either bind copy arrives: each copy
+        // pairs with one of them, oldest first.
+        let mut gate = PressGate::default();
+        let got: Vec<bool> = [(Keys, 0), (Keys, 120), (Socket, 150), (Socket, 170)]
+            .into_iter()
+            .map(|(source, at)| gate.accept(source, at))
+            .collect();
+        assert_eq!(got, [true, true, false, false]);
     }
 
     #[test]
