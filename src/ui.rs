@@ -5544,6 +5544,61 @@ pub fn run_app(
     });
 }
 
+/// How long the capsule shows after a Linux recording starts: `wf-recorder` records the whole
+/// output, so the capsule then leaves the screen (finishing is by the shortcut) and comes back
+/// for Processing and Completed.
+#[cfg(any(target_os = "linux", test))]
+const LINUX_PILL_RECORDING_SHOWN_MS: u64 = 1_500;
+
+/// What the capsule's window should do on Linux, given the island's phase, how long the
+/// recording has run, and whether the window is open.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PillWindowStep {
+    Keep,
+    Close,
+    Open,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn pill_window_step(phase: IslandPhase, recording_ms: Option<u64>, open: bool) -> PillWindowStep {
+    match phase {
+        IslandPhase::Recording
+            if open && recording_ms.is_some_and(|ms| ms >= LINUX_PILL_RECORDING_SHOWN_MS) =>
+        {
+            PillWindowStep::Close
+        }
+        IslandPhase::Processing | IslandPhase::Completed { .. } if !open => PillWindowStep::Open,
+        _ => PillWindowStep::Keep,
+    }
+}
+
+/// Closes the capsule's window once a Linux screen recording has run
+/// `LINUX_PILL_RECORDING_SHOWN_MS`, so it stays out of the capture, and opens it again for the
+/// result. A lab recording captures nothing, so its capsule stays.
+#[cfg(target_os = "linux")]
+fn step_linux_pill_window(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) {
+    let coord = coord_entity.read(cx);
+    let recording_ms = coord.active_recording.as_ref().and_then(|recording| {
+        matches!(recording.source, CaptureSource::Screen { .. })
+            .then(|| u64::try_from(recording.started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    });
+    let pill = cx
+        .windows()
+        .into_iter()
+        .find(|handle| handle.downcast::<HudPillWindow>().is_some());
+    match pill_window_step(coord.island_phase, recording_ms, pill.is_some()) {
+        PillWindowStep::Keep => {}
+        PillWindowStep::Close => {
+            if let Some(handle) = pill {
+                scrawl_log("Capsule hidden for the recording".to_string());
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+        }
+        PillWindowStep::Open => ensure_hud_pill_open(coord_entity, cx),
+    }
+}
+
 /// Runs the GPUI app on Linux: the capsule and the review window, driven by the capture
 /// shortcut, with Hyprland rules placing the windows. The tray and the control socket that
 /// routes `scrawl toggle` here come with task 4.
@@ -5610,6 +5665,7 @@ pub fn run_app(
                     if should_open_pill {
                         ensure_hud_pill_open(&loop_coord, cx);
                     }
+                    step_linux_pill_window(&loop_coord, cx);
                     motion::poll_tune();
                     if loop_coord.read(cx).switcher.is_held() {
                         loop_coord.update(cx, |coord, cx| coord.tick_switcher(cx));
@@ -5640,6 +5696,33 @@ mod tests {
         assert_eq!(PILL_APP_ID, hypr::PILL_CLASS);
         assert_eq!(PICKER_APP_ID, hypr::PICKER_CLASS);
         assert_eq!(REVIEW_APP_ID, hypr::REVIEW_CLASS);
+    }
+
+    #[test]
+    fn the_linux_capsule_leaves_the_recording_and_returns_for_the_result() {
+        use PillWindowStep::{Close, Keep, Open};
+        let rec = IslandPhase::Recording;
+        // Shown while the recording starts, then off screen.
+        assert_eq!(pill_window_step(rec, Some(400), true), Keep);
+        assert_eq!(pill_window_step(rec, Some(1_500), true), Close);
+        assert_eq!(pill_window_step(rec, Some(9_000), false), Keep);
+        // Back for the result.
+        assert_eq!(pill_window_step(IslandPhase::Processing, None, false), Open);
+        let done = IslandPhase::Completed {
+            finished_at: Instant::now(),
+            frame_count: 3,
+            duration_ms: 4_000,
+            inbox_count: 0,
+        };
+        assert_eq!(pill_window_step(done, None, false), Open);
+        assert_eq!(pill_window_step(done, None, true), Keep);
+        // Picking opens its own window; dismissing or hidden never reopens one.
+        let picking = IslandPhase::Selecting {
+            mode: SelectionMode::Area,
+        };
+        assert_eq!(pill_window_step(picking, None, false), Keep);
+        assert_eq!(pill_window_step(IslandPhase::Dismissing, None, false), Keep);
+        assert_eq!(pill_window_step(IslandPhase::Hidden, None, false), Keep);
     }
 
     #[test]
