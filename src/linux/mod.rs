@@ -124,7 +124,7 @@ fn capture_into(
     note: Option<String>,
     created: bool,
 ) -> Result<PathBuf> {
-    let target = hypr::discover_target(window);
+    let target = hypr::focused_monitor_target(window);
     let started_at = Instant::now();
     let audio = AudioRecorder::start().ok();
     let video = bundle_dir.join("recording.mp4");

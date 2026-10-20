@@ -206,16 +206,17 @@ pub fn frontmost_app_info() -> Option<(i32, String, Option<String>)> {
 }
 
 /// What to record: the newest window matching `window_query`, else the monitor under `point`
-/// (`display_target_at`), named after the app in front.
-pub fn discover_target_at(window_query: Option<&str>, point: Option<[f64; 2]>) -> TargetInfo {
+/// (`display_target_at`), named after the app in front. `focused_monitor_target` when there is
+/// no point or no monitor list.
+pub fn target_under_point(window_query: Option<&str>, point: Option<[f64; 2]>) -> TargetInfo {
     if window_query.is_some() {
-        return discover_target(window_query);
+        return focused_monitor_target(window_query);
     }
     let target = hypr_json::<Vec<Monitor>>("monitors")
         .ok()
         .and_then(|monitors| display_target_at(&monitors, point));
     let Some(mut target) = target else {
-        return discover_target(None);
+        return focused_monitor_target(None);
     };
     if let Some((_, class, _)) = frontmost_app_info() {
         target.app = Some(class);
@@ -341,8 +342,9 @@ pub fn pick_target(
     })
 }
 
-/// What to record now; the first monitor's guess when Hyprland can't be asked.
-pub fn discover_target(window_query: Option<&str>) -> TargetInfo {
+/// What to record now without a pointer: the newest window matching `window_query`, else the
+/// focused monitor (`pick_target`); the first monitor's guess when Hyprland can't be asked.
+pub fn focused_monitor_target(window_query: Option<&str>) -> TargetInfo {
     let asked = hypr_json::<Vec<Monitor>>("monitors").and_then(|monitors| {
         let clients = hypr_json::<Vec<Client>>("clients")?;
         pick_target(&monitors, &clients, window_query)
@@ -545,24 +547,11 @@ pub fn selectable_windows(monitors: &[Monitor], clients: &[Client], own_pid: i32
 
 /// The monitor under `point` (else the nearest, else the focused one) as a display target.
 pub fn display_target_at(monitors: &[Monitor], point: Option<[f64; 2]>) -> Option<TargetInfo> {
-    let screens: Vec<Screen> = monitors
-        .iter()
-        .map(|m| {
-            let f = monitor_frame(m);
-            Screen {
-                id: m.id,
-                frame: [f.x, f.y, f.width, f.height],
-                visible: [f.x, f.y, f.width, f.height],
-                scale: m.scale,
-                safe_top: 0.0,
-            }
-        })
-        .collect();
-    let index = point
-        .and_then(|p| crate::screens::index_at(&screens, p))
-        .or_else(|| monitors.iter().position(|m| m.focused))
-        .or((!monitors.is_empty()).then_some(0))?;
-    let monitor = &monitors[index];
+    let screens = screens_from(monitors);
+    let monitor = match point.and_then(|p| crate::screens::index_at(&screens, p)) {
+        Some(index) => monitors.iter().find(|m| m.id == screens[index].id)?,
+        None => monitors.iter().find(|m| m.focused).or(monitors.first())?,
+    };
     Some(TargetInfo {
         mode: CaptureMode::Display,
         app: None,
@@ -832,6 +821,11 @@ mod tests {
         // No pointer: the focused monitor.
         assert_eq!(display_target_at(&monitors(), None).unwrap().display_id, 0);
         assert!(display_target_at(&[], None).is_none());
+        // `screens_from` puts the origin monitor first; the answer is still by monitor id.
+        let mut reversed = monitors();
+        reversed.reverse();
+        assert_eq!(display_target_at(&reversed, Some([2000.0, 100.0])).unwrap().display_id, 1);
+        assert_eq!(display_target_at(&reversed, Some([10.0, 10.0])).unwrap().display_id, 0);
     }
 
     #[test]
