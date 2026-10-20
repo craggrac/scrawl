@@ -103,6 +103,31 @@ impl PressGate {
     }
 }
 
+/// The modifiers (`linux::hotkey::MOD_*`) whose release ends the hold of a shortcut pressed as
+/// `source` with `held` down (what the listener last saw), or 0 when the press is a tap. A
+/// `scrawl toggle` is always a tap: the bind may still have Super down when it arrives, and
+/// that is not the user holding the shortcut. A press the listener saw is a hold only while all
+/// of the shortcut's own modifiers are down.
+pub fn hold_modifiers(source: PressSource, held: u64, label: &str) -> u64 {
+    use crate::linux::hotkey::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
+    if source == PressSource::Socket {
+        return 0;
+    }
+    let own = crate::capture::shortcut_parts(label)
+        .0
+        .chars()
+        .fold(0, |bits, symbol| {
+            bits | match symbol {
+                '⌘' => MOD_SUPER,
+                '⌃' => MOD_CTRL,
+                '⌥' => MOD_ALT,
+                '⇧' => MOD_SHIFT,
+                _ => 0,
+            }
+        });
+    if held & own == own { own } else { 0 }
+}
+
 /// Modifier symbols in the order macOS writes them: ⌃⌥⇧⌘.
 fn modifier_symbols(cmd: bool, ctrl: bool, alt: bool, shift: bool) -> String {
     [(ctrl, '⌃'), (alt, '⌥'), (shift, '⇧'), (cmd, '⌘')]
@@ -164,6 +189,23 @@ mod tests {
             .map(|(source, at)| gate.accept(source, at))
             .collect();
         assert_eq!(got, [true, true, false, false]);
+    }
+
+    #[test]
+    fn only_a_press_the_listener_saw_can_be_a_hold() {
+        use crate::linux::hotkey::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
+        use PressSource::{Keys, Socket};
+        // The bind's `scrawl toggle` is a tap even with the shortcut's modifiers down.
+        assert_eq!(hold_modifiers(Socket, MOD_SUPER, "⌘R"), 0);
+        assert_eq!(hold_modifiers(Socket, MOD_ALT | MOD_SHIFT, "⌥⇧S"), 0);
+        // The listener's press: the shortcut's own modifiers are the hold, whatever else is down.
+        assert_eq!(hold_modifiers(Keys, MOD_ALT | MOD_SHIFT, "⌥⇧S"), MOD_ALT | MOD_SHIFT);
+        assert_eq!(hold_modifiers(Keys, MOD_SUPER | MOD_CTRL, "⌘R"), MOD_SUPER);
+        assert_eq!(hold_modifiers(Keys, MOD_SUPER, "⌘R"), MOD_SUPER);
+        // A modifier missing, or a shortcut with none (F5): a tap.
+        assert_eq!(hold_modifiers(Keys, MOD_ALT, "⌥⇧S"), 0);
+        assert_eq!(hold_modifiers(Keys, 0, "⌘R"), 0);
+        assert_eq!(hold_modifiers(Keys, MOD_SUPER, "F5"), 0);
     }
 
     #[test]

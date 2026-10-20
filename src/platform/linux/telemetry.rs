@@ -2,7 +2,7 @@
 //! here the evdev recorder (`linux::input::InputRecorder`) runs for each capture, from
 //! `reset_for_session` to `finish_session`, and hands its events over at the end.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -41,6 +41,8 @@ pub struct SharedCaptureTelemetry {
     capture_mode: Mutex<CaptureMode>,
     picker_rect: Mutex<Option<([f32; 4], u8)>>,
     escape: AtomicBool,
+    /// The modifiers whose release ends the hold of the last accepted shortcut press (0: a tap).
+    hold_mods: AtomicU64,
     /// Lets a key press seen by both the listener and the bind act once.
     press_gate: Mutex<(Instant, PressGate)>,
     input: Mutex<Option<InputRecorder>>,
@@ -72,6 +74,7 @@ impl SharedCaptureTelemetry {
             capture_mode: Mutex::new(CaptureMode::Display),
             picker_rect: Mutex::new(None),
             escape: AtomicBool::new(false),
+            hold_mods: AtomicU64::new(0),
             press_gate: Mutex::new((Instant::now(), PressGate::default())),
             input: Mutex::new(None),
             session_events: Mutex::new(None),
@@ -94,8 +97,23 @@ impl SharedCaptureTelemetry {
             gate.1.accept(source, now_ms)
         };
         if accepted {
+            let hold = super::shortcut::hold_modifiers(
+                source,
+                super::modifier_flags(),
+                &self
+                    .shortcut
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .label,
+            );
+            self.hold_mods.store(hold, Ordering::Release);
             self.emit_capture_shortcut();
         }
+    }
+
+    /// The hold of the shortcut press being handled (`shortcut::hold_modifiers`).
+    pub fn take_hold_mods(&self) -> u64 {
+        self.hold_mods.swap(0, Ordering::AcqRel)
     }
 
     /// Esc went down, in whichever app (`linux::hotkey`).

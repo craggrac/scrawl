@@ -1135,7 +1135,16 @@ impl ScrawlCoordinator {
                 scrawl_log("Shortcut held back: a required permission is off");
                 return;
             }
-            self.hold_mods = crate::platform::modifier_flags();
+            // On Linux a `scrawl toggle` is always a tap, and a hold counts only for the
+            // shortcut's own modifiers (`shortcut::hold_modifiers`).
+            #[cfg(target_os = "linux")]
+            {
+                self.hold_mods = self.telemetry.take_hold_mods();
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                self.hold_mods = crate::platform::modifier_flags();
+            }
             // An Esc from before this hold doesn't cancel it.
             self.telemetry.take_escape();
         }
