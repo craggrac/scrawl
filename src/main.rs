@@ -203,6 +203,7 @@ enum Command {
         record: bool,
         /// Start capturing the cabled iPhone immediately on launch.
         #[arg(long, conflicts_with = "record")]
+        #[cfg_attr(not(target_os = "macos"), arg(hide = true))]
         iphone: bool,
     },
     /// Generate a realistic annotated demo bundle (contact sheet + keyframes + transcript).
@@ -1457,6 +1458,11 @@ fn main() -> Result<()> {
     };
     match command {
         Command::App { record, iphone } => {
+            #[cfg(not(target_os = "macos"))]
+            ensure!(
+                !iphone,
+                "--iphone needs macOS: iPhone capture isn't available on Linux"
+            );
             ui::run_app(None, record, iphone, None);
             Ok(())
         }
