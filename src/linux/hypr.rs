@@ -656,11 +656,12 @@ pub fn region_target_on(
 
 /// The session-only Hyprland rule (Lua, Hyprland 0.53+) that floats the capsule's window
 /// `width`×`height` points, `top` points below the top of its monitor, centred, pinned to every
-/// workspace and never focused.
+/// workspace. It is not focused when it appears, but it must stay focusable: Hyprland sends no
+/// pointer events to a `no_focus` window, so its chips could not be clicked.
 pub fn pill_rule(width: f32, height: f32, top: f32) -> String {
     format!(
         "hl.window_rule({{ match = {{ class = \"^({PILL_CLASS})$\" }}, float = true, pin = true, \
-         no_focus = true, border_size = 0, no_shadow = true, no_blur = true, \
+         no_initial_focus = true, border_size = 0, no_shadow = true, no_blur = true, \
          move = {{ \"(monitor_w-{width})/2\", \"{top}\" }}, size = {{ \"{width}\", \"{height}\" }} }})"
     )
 }
@@ -670,7 +671,7 @@ pub fn legacy_pill_rules(width: f32, height: f32, top: f32) -> Vec<String> {
     [
         "float".to_owned(),
         "pin".to_owned(),
-        "nofocus".to_owned(),
+        "noinitialfocus".to_owned(),
         "bordersize 0".to_owned(),
         "noshadow".to_owned(),
         "noblur".to_owned(),
@@ -920,14 +921,14 @@ mod tests {
     fn pill_rule_floats_the_capsule_top_centre() {
         assert_eq!(
             pill_rule(520.0, 84.0, 34.0),
-            r#"hl.window_rule({ match = { class = "^(scrawl-pill)$" }, float = true, pin = true, no_focus = true, border_size = 0, no_shadow = true, no_blur = true, move = { "(monitor_w-520)/2", "34" }, size = { "520", "84" } })"#
+            r#"hl.window_rule({ match = { class = "^(scrawl-pill)$" }, float = true, pin = true, no_initial_focus = true, border_size = 0, no_shadow = true, no_blur = true, move = { "(monitor_w-520)/2", "34" }, size = { "520", "84" } })"#
         );
         assert_eq!(
             legacy_pill_rules(520.0, 84.0, 34.0),
             [
                 "float, class:^(scrawl-pill)$",
                 "pin, class:^(scrawl-pill)$",
-                "nofocus, class:^(scrawl-pill)$",
+                "noinitialfocus, class:^(scrawl-pill)$",
                 "bordersize 0, class:^(scrawl-pill)$",
                 "noshadow, class:^(scrawl-pill)$",
                 "noblur, class:^(scrawl-pill)$",
