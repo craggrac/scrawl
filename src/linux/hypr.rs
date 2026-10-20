@@ -15,7 +15,17 @@ use serde::de::DeserializeOwned;
 
 use crate::capture::scrawl_log;
 use crate::model::{CaptureMode, TargetFrame, TargetInfo};
+use crate::screens::Screen;
 use crate::windows::{ActivityLog, WindowEntry};
+
+/// The capsule window's Wayland app id (`WindowOptions::app_id`), which Hyprland calls its class.
+pub const PILL_CLASS: &str = "scrawl-pill";
+/// The picker window's app id.
+pub const PICKER_CLASS: &str = "scrawl-picker";
+/// The review window's app id.
+pub const REVIEW_CLASS: &str = "scrawl-review";
+/// Windows narrower or shorter than this (points) aren't offered by the picker.
+const MIN_WINDOW: i32 = 80;
 
 /// How often the cursor is read.
 const TICK: Duration = Duration::from_millis(100);
@@ -43,6 +53,9 @@ pub struct Monitor {
     pub transform: i32,
     pub focused: bool,
     pub active_workspace: WorkspaceRef,
+    /// Space the bars keep, logical points: left, top, right, bottom.
+    #[serde(default)]
+    pub reserved: [f64; 4],
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +75,8 @@ pub struct Client {
     /// 0 is the window focused last.
     #[serde(rename = "focusHistoryID")]
     pub focus_history_id: i32,
+    #[serde(default)]
+    pub pid: i32,
 }
 
 #[derive(Deserialize)]
@@ -75,8 +90,9 @@ struct ActiveWindow {
     address: String,
 }
 
-/// One request on `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`.
-fn hypr_json<T: DeserializeOwned>(command: &str) -> Result<T> {
+/// One request on `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`, and its
+/// reply.
+fn hypr_request(request: &str) -> Result<Vec<u8>> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
     let instance =
         std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").context("Not running under Hyprland")?;
@@ -85,10 +101,110 @@ fn hypr_json<T: DeserializeOwned>(command: &str) -> Result<T> {
         .with_context(|| format!("Could not reach Hyprland at {}", path.display()))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    stream.write_all(format!("j/{command}").as_bytes())?;
+    stream.write_all(request.as_bytes())?;
     let mut reply = Vec::new();
     stream.read_to_end(&mut reply)?;
+    Ok(reply)
+}
+
+/// A query answered with the JSON `hyprctl -j` prints.
+fn hypr_json<T: DeserializeOwned>(command: &str) -> Result<T> {
+    let reply = hypr_request(&format!("j/{command}"))?;
     serde_json::from_slice(&reply).with_context(|| format!("Invalid Hyprland reply to {command}"))
+}
+
+/// A command (`eval …`, `keyword …`, `dispatch …`); `Err` with Hyprland's complaint unless it
+/// answers `ok`.
+fn hypr_command(command: &str) -> Result<()> {
+    let reply = hypr_request(&format!("/{command}"))?;
+    let reply = String::from_utf8_lossy(&reply);
+    anyhow::ensure!(reply.trim() == "ok", "{}", reply.trim());
+    Ok(())
+}
+
+/// Installs Scrawl's window rules for this Hyprland session (the user's config is never
+/// edited): the capsule floats top-centre, the picker covers its monitor, the review window
+/// floats centred. Lua (`eval`) first, `keyword windowrulev2` on Hyprland before 0.53.
+pub fn install_window_rules(pill: [f32; 3], review: [f32; 2]) {
+    let [width, height, top] = pill;
+    let lua = [pill_rule(width, height, top), picker_rule(), review_rule(review[0], review[1])];
+    let failed: Vec<String> = lua
+        .iter()
+        .filter_map(|rule| hypr_command(&format!("eval {rule}")).err())
+        .map(|error| format!("{error:#}"))
+        .collect();
+    if failed.is_empty() {
+        return;
+    }
+    scrawl_log(format!("Hyprland rules (Lua): {}; trying windowrulev2", failed.join("; ")));
+    let legacy = legacy_pill_rules(width, height, top)
+        .into_iter()
+        .chain(legacy_window_rules(review[0], review[1]));
+    for rule in legacy {
+        if let Err(error) = hypr_command(&format!("keyword windowrulev2 {rule}")) {
+            scrawl_log(format!("Hyprland rule {rule:?}: {error:#}"));
+        }
+    }
+}
+
+/// Gives the keyboard to the window at `address` (`0x…`).
+pub fn focus_window(address: &str) {
+    let lua = format!(
+        "eval hl.dispatch(hl.dsp.focus({{ window = \"address:{address}\" }}))"
+    );
+    if let Err(error) = hypr_command(&lua)
+        .or_else(|_| hypr_command(&format!("dispatch focuswindow address:{address}")))
+    {
+        scrawl_log(format!("Hyprland: could not focus {address}: {error:#}"));
+    }
+}
+
+/// The focused window, if any.
+pub fn active_window() -> Option<Client> {
+    parse_active_window(&hypr_request("j/activewindow").ok()?)
+}
+
+/// Every window Hyprland knows (none when it can't be asked).
+pub fn clients() -> Vec<Client> {
+    hypr_json("clients").unwrap_or_default()
+}
+
+/// The windows the picker offers (`selectable_windows`), leaving out Scrawl's own.
+pub fn list_selectable_windows() -> Vec<TargetInfo> {
+    let (Ok(monitors), Ok(clients)) = (
+        hypr_json::<Vec<Monitor>>("monitors"),
+        hypr_json::<Vec<Client>>("clients"),
+    ) else {
+        return Vec::new();
+    };
+    selectable_windows(&monitors, &clients, std::process::id() as i32)
+}
+
+/// The app in front other than Scrawl (`front_app`).
+pub fn frontmost_app_info() -> Option<(i32, String, Option<String>)> {
+    front_app(
+        active_window().as_ref(),
+        &clients(),
+        std::process::id() as i32,
+    )
+}
+
+/// What to record: the newest window matching `window_query`, else the monitor under `point`
+/// (`display_target_at`), named after the app in front.
+pub fn discover_target_at(window_query: Option<&str>, point: Option<[f64; 2]>) -> TargetInfo {
+    if window_query.is_some() {
+        return discover_target(window_query);
+    }
+    let target = hypr_json::<Vec<Monitor>>("monitors")
+        .ok()
+        .and_then(|monitors| display_target_at(&monitors, point));
+    let Some(mut target) = target else {
+        return discover_target(None);
+    };
+    if let Some((_, class, _)) = frontmost_app_info() {
+        target.app = Some(class);
+    }
+    target
 }
 
 /// Set once a cursor lookup failure has been logged, so a recording logs the first only.
@@ -344,6 +460,234 @@ fn run(
     }
 }
 
+/// Every monitor as a `screens::Screen` (none when Hyprland can't be asked).
+pub fn screens() -> Vec<Screen> {
+    hypr_json::<Vec<Monitor>>("monitors")
+        .map(|monitors| screens_from(&monitors))
+        .unwrap_or_default()
+}
+
+/// The monitors as `screens::Screen`s: `visible` is the frame less the bars' reserved space,
+/// and the monitor at the origin comes first (the primary display on macOS).
+pub fn screens_from(monitors: &[Monitor]) -> Vec<Screen> {
+    let mut out: Vec<Screen> = monitors
+        .iter()
+        .map(|m| {
+            let f = monitor_frame(m);
+            let frame = [f.x, f.y, f.width, f.height];
+            let [left, top, right, bottom] = m.reserved;
+            Screen {
+                id: m.id,
+                frame,
+                visible: [
+                    frame[0] + left,
+                    frame[1] + top,
+                    (frame[2] - left - right).max(1.0),
+                    (frame[3] - top - bottom).max(1.0),
+                ],
+                scale: m.scale,
+                safe_top: 0.0,
+            }
+        })
+        .collect();
+    out.sort_by_key(|s| !(s.frame[0] == 0.0 && s.frame[1] == 0.0));
+    out
+}
+
+/// The windows the picker offers, front to back: mapped windows on a monitor's active
+/// workspace, at least `MIN_WINDOW` a side, not Scrawl's own (`own_pid`).
+pub fn selectable_windows(monitors: &[Monitor], clients: &[Client], own_pid: i32) -> Vec<TargetInfo> {
+    let mut visible: Vec<(&Client, &Monitor)> = clients
+        .iter()
+        .filter(|c| c.mapped && !c.hidden && c.pid != own_pid)
+        .filter(|c| c.size[0] >= MIN_WINDOW && c.size[1] >= MIN_WINDOW)
+        .filter_map(|c| {
+            let monitor = monitors.iter().find(|m| i64::from(m.id) == c.monitor)?;
+            (c.workspace.id == monitor.active_workspace.id).then_some((c, monitor))
+        })
+        .collect();
+    visible.sort_by_key(|(c, _)| (!c.floating, c.focus_history_id));
+    visible
+        .into_iter()
+        .map(|(c, monitor)| TargetInfo {
+            mode: CaptureMode::Window,
+            app: Some(c.class.clone()).filter(|s| !s.is_empty()),
+            bundle_id: None,
+            window_title: Some(c.title.clone()).filter(|s| !s.is_empty()),
+            window_id: Some(window_id(&c.address)),
+            display_id: monitor.id,
+            frame: TargetFrame {
+                x: f64::from(c.at[0]),
+                y: f64::from(c.at[1]),
+                width: f64::from(c.size[0]),
+                height: f64::from(c.size[1]),
+                scale: monitor.scale,
+            },
+        })
+        .collect()
+}
+
+/// The monitor under `point` (else the nearest, else the focused one) as a display target.
+pub fn display_target_at(monitors: &[Monitor], point: Option<[f64; 2]>) -> Option<TargetInfo> {
+    let screens: Vec<Screen> = monitors
+        .iter()
+        .map(|m| {
+            let f = monitor_frame(m);
+            Screen {
+                id: m.id,
+                frame: [f.x, f.y, f.width, f.height],
+                visible: [f.x, f.y, f.width, f.height],
+                scale: m.scale,
+                safe_top: 0.0,
+            }
+        })
+        .collect();
+    let index = point
+        .and_then(|p| crate::screens::index_at(&screens, p))
+        .or_else(|| monitors.iter().position(|m| m.focused))
+        .or((!monitors.is_empty()).then_some(0))?;
+    let monitor = &monitors[index];
+    Some(TargetInfo {
+        mode: CaptureMode::Display,
+        app: None,
+        bundle_id: None,
+        window_title: None,
+        window_id: None,
+        display_id: monitor.id,
+        frame: monitor_frame(monitor),
+    })
+}
+
+/// `activewindow`'s reply; `{}` when nothing has focus.
+pub fn parse_active_window(reply: &[u8]) -> Option<Client> {
+    serde_json::from_slice(reply).ok()
+}
+
+/// The app in front other than Scrawl: the focused window, else the one focused most recently.
+/// `(pid, class, None)`: Wayland apps have no bundle id.
+pub fn front_app(
+    active: Option<&Client>,
+    clients: &[Client],
+    own_pid: i32,
+) -> Option<(i32, String, Option<String>)> {
+    active
+        .filter(|c| c.pid != own_pid)
+        .or_else(|| {
+            clients
+                .iter()
+                .filter(|c| c.mapped && c.pid != own_pid)
+                .min_by_key(|c| c.focus_history_id)
+        })
+        .map(|c| (c.pid, c.class.clone(), None))
+}
+
+/// An area dragged in the picker as a region target: on the display holding its centre, trimmed
+/// to it and at least `MIN_AREA` a side (`screens::area_on_display`), named after the window
+/// under its centre, else the app in front.
+pub fn region_target_on(
+    screens: &[Screen],
+    area: [f64; 4],
+    windows: &[TargetInfo],
+    front: Option<(i32, String, Option<String>)>,
+) -> TargetInfo {
+    let [x, y, width, height] = area;
+    let hit = windows.iter().find(|w| {
+        let f = w.frame;
+        crate::screens::contains([f.x, f.y, f.width, f.height], [x + width / 2.0, y + height / 2.0])
+    });
+    let (display_id, scale, rect) = crate::screens::area_on_display(screens, area).map_or_else(
+        || {
+            let min = crate::screens::MIN_AREA;
+            (0, 1.0, [x, y, width.max(min), height.max(min)])
+        },
+        |(i, rect)| (screens[i].id, screens[i].scale, rect),
+    );
+    TargetInfo {
+        mode: CaptureMode::Region,
+        app: hit
+            .and_then(|w| w.app.clone())
+            .or_else(|| front.as_ref().map(|(_, name, _)| name.clone())),
+        bundle_id: None,
+        window_title: hit.and_then(|w| w.window_title.clone()),
+        window_id: None,
+        display_id,
+        frame: TargetFrame {
+            x: rect[0],
+            y: rect[1],
+            width: rect[2],
+            height: rect[3],
+            scale,
+        },
+    }
+}
+
+/// The session-only Hyprland rule (Lua, Hyprland 0.53+) that floats the capsule's window
+/// `width`×`height` points, `top` points below the top of its monitor, centred, pinned to every
+/// workspace and never focused.
+pub fn pill_rule(width: f32, height: f32, top: f32) -> String {
+    format!(
+        "hl.window_rule({{ match = {{ class = \"^({PILL_CLASS})$\" }}, float = true, pin = true, \
+         no_focus = true, border_size = 0, no_shadow = true, no_blur = true, \
+         move = {{ \"(monitor_w-{width})/2\", \"{top}\" }}, size = {{ \"{width}\", \"{height}\" }} }})"
+    )
+}
+
+/// The same rules for Hyprland before 0.53 (`keyword windowrulev2`).
+pub fn legacy_pill_rules(width: f32, height: f32, top: f32) -> Vec<String> {
+    [
+        "float".to_owned(),
+        "pin".to_owned(),
+        "nofocus".to_owned(),
+        "bordersize 0".to_owned(),
+        "noshadow".to_owned(),
+        "noblur".to_owned(),
+        format!("move ((monitor_w-{width})/2) {top}"),
+        format!("size {width} {height}"),
+    ]
+    .into_iter()
+    .map(|rule| format!("{rule}, class:^({PILL_CLASS})$"))
+    .collect()
+}
+
+/// The picker's window covers its whole monitor, pinned, with nothing drawn around it.
+pub fn picker_rule() -> String {
+    format!(
+        "hl.window_rule({{ match = {{ class = \"^({PICKER_CLASS})$\" }}, float = true, pin = true, \
+         border_size = 0, no_shadow = true, no_blur = true, no_anim = true, \
+         move = {{ \"0\", \"0\" }}, size = {{ \"monitor_w\", \"monitor_h\" }} }})"
+    )
+}
+
+/// The review window floats centred at `width`×`height` points instead of tiling.
+pub fn review_rule(width: f32, height: f32) -> String {
+    format!(
+        "hl.window_rule({{ match = {{ class = \"^({REVIEW_CLASS})$\" }}, float = true, center = true, \
+         size = {{ \"{width}\", \"{height}\" }} }})"
+    )
+}
+
+/// `picker_rule` and `review_rule` for Hyprland before 0.53.
+pub fn legacy_window_rules(review_width: f32, review_height: f32) -> Vec<String> {
+    let picker = [
+        "float",
+        "pin",
+        "bordersize 0",
+        "noshadow",
+        "noblur",
+        "noanim",
+        "move 0 0",
+        "size monitor_w monitor_h",
+    ]
+    .map(|rule| format!("{rule}, class:^({PICKER_CLASS})$"));
+    let review = [
+        "float".to_owned(),
+        "center".to_owned(),
+        format!("size {review_width} {review_height}"),
+    ]
+    .map(|rule| format!("{rule}, class:^({REVIEW_CLASS})$"));
+    picker.into_iter().chain(review).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +752,153 @@ mod tests {
     fn bounds_are_relative_to_the_monitor() {
         let entries = window_entries(&clients(), &monitors()[1]);
         assert_eq!(entries[0].bounds, [10, 40, 1000, 800]);
+    }
+
+    #[test]
+    fn screens_are_logical_less_the_bars_with_the_origin_first() {
+        let screens = screens_from(&monitors());
+        assert_eq!(screens.len(), 2);
+        assert_eq!(screens[0].id, 0);
+        assert_eq!(screens[0].frame, [0.0, 0.0, 1920.0, 1080.0]);
+        assert_eq!(screens[0].visible, [0.0, 42.0, 1920.0, 1038.0]);
+        assert_eq!(screens[0].scale, 1.0);
+        assert_eq!(screens[1].frame, [1920.0, 0.0, 2048.0, 1152.0]);
+        assert_eq!(screens[1].visible, screens[1].frame);
+        assert_eq!(screens[1].scale, 1.25);
+        let mut reversed = monitors();
+        reversed.reverse();
+        assert_eq!(screens_from(&reversed)[0].id, 0);
+    }
+
+    #[test]
+    fn selectable_windows_are_visible_others_front_to_back() {
+        // Kitty is Scrawl itself here; Steam is on a hidden workspace.
+        let windows = selectable_windows(&monitors(), &clients(), 2);
+        let apps: Vec<_> = windows.iter().map(|w| w.app.as_deref().unwrap()).collect();
+        assert_eq!(apps, ["com.t3tools.T3Code", "Helium"]);
+        let helium = &windows[1];
+        assert_eq!(helium.mode, CaptureMode::Window);
+        assert_eq!(helium.window_title.as_deref(), Some("localhost:5173"));
+        assert_eq!(helium.display_id, 1);
+        assert_eq!(
+            (helium.frame.x, helium.frame.y, helium.frame.width, helium.frame.height),
+            (1930.0, 40.0, 1000.0, 800.0)
+        );
+        assert_eq!(helium.frame.scale, 1.25);
+        assert!(helium.window_id.is_some());
+        // Floating windows draw above tiled ones.
+        let all = selectable_windows(&monitors(), &clients(), 99);
+        assert_eq!(all[0].app.as_deref(), Some("kitty"));
+        // Slivers are left out.
+        let mut tiny = clients();
+        tiny[1].size = [60, 400];
+        assert!(selectable_windows(&monitors(), &tiny, 99).iter().all(|w| w.app.as_deref() != Some("kitty")));
+    }
+
+    #[test]
+    fn display_target_is_the_monitor_under_the_point() {
+        let right = display_target_at(&monitors(), Some([2000.0, 100.0])).unwrap();
+        assert_eq!(right.mode, CaptureMode::Display);
+        assert_eq!(right.display_id, 1);
+        assert_eq!((right.frame.x, right.frame.width, right.frame.scale), (1920.0, 2048.0, 1.25));
+        // Below the shorter monitor: the nearest one.
+        assert_eq!(display_target_at(&monitors(), Some([100.0, 1100.0])).unwrap().display_id, 0);
+        // No pointer: the focused monitor.
+        assert_eq!(display_target_at(&monitors(), None).unwrap().display_id, 0);
+        assert!(display_target_at(&[], None).is_none());
+    }
+
+    #[test]
+    fn front_app_skips_scrawl_for_the_last_window_focused() {
+        assert!(parse_active_window(b"{}").is_none());
+        let kitty = clients().remove(1);
+        let active = parse_active_window(&serde_json::to_vec(&serde_json::json!({
+            "address": "0x1", "at": [0, 0], "size": [10, 10], "class": "kitty", "title": "t",
+            "workspace": {"id": 1}, "monitor": 0, "mapped": true, "hidden": false,
+            "floating": true, "focusHistoryID": 0, "pid": 7
+        })).unwrap()).unwrap();
+        assert_eq!((active.pid, active.class.as_str()), (7, "kitty"));
+        assert_eq!(front_app(Some(&active), &clients(), 99), Some((7, "kitty".to_owned(), None)));
+        // Scrawl (pid 2) has focus: the window focused before it.
+        assert_eq!(
+            front_app(Some(&kitty), &clients(), 2),
+            Some((1, "com.t3tools.T3Code".to_owned(), None))
+        );
+        assert_eq!(front_app(None, &clients(), 2), Some((1, "com.t3tools.T3Code".to_owned(), None)));
+        assert_eq!(front_app(None, &[], 2), None);
+    }
+
+    #[test]
+    fn region_target_is_named_after_the_window_under_it_and_kept_on_one_display() {
+        let screens = screens_from(&monitors());
+        let windows = selectable_windows(&monitors(), &clients(), 99);
+        let front = Some((1, "com.t3tools.T3Code".to_owned(), None));
+        // Over Helium on the scaled monitor.
+        let target = region_target_on(&screens, [2000.0, 100.0, 300.0, 200.0], &windows, front.clone());
+        assert_eq!(target.mode, CaptureMode::Region);
+        assert_eq!(target.app.as_deref(), Some("Helium"));
+        assert_eq!(target.window_title.as_deref(), Some("localhost:5173"));
+        assert_eq!(target.window_id, None);
+        assert_eq!(target.display_id, 1);
+        assert_eq!(
+            (target.frame.x, target.frame.y, target.frame.width, target.frame.height, target.frame.scale),
+            (2000.0, 100.0, 300.0, 200.0, 1.25)
+        );
+        // A sliver at the right edge grows to the smallest area, inside the display.
+        let edge = region_target_on(&screens, [1915.0, 500.0, 4.0, 4.0], &[], front.clone());
+        assert_eq!(edge.display_id, 0);
+        assert_eq!((edge.frame.x, edge.frame.width, edge.frame.height), (1920.0 - 32.0, 32.0, 32.0));
+        // Over no window: the app in front.
+        assert_eq!(edge.app.as_deref(), Some("com.t3tools.T3Code"));
+        assert_eq!(edge.window_title, None);
+    }
+
+    #[test]
+    fn pill_rule_floats_the_capsule_top_centre() {
+        assert_eq!(
+            pill_rule(520.0, 84.0, 34.0),
+            r#"hl.window_rule({ match = { class = "^(scrawl-pill)$" }, float = true, pin = true, no_focus = true, border_size = 0, no_shadow = true, no_blur = true, move = { "(monitor_w-520)/2", "34" }, size = { "520", "84" } })"#
+        );
+        assert_eq!(
+            legacy_pill_rules(520.0, 84.0, 34.0),
+            [
+                "float, class:^(scrawl-pill)$",
+                "pin, class:^(scrawl-pill)$",
+                "nofocus, class:^(scrawl-pill)$",
+                "bordersize 0, class:^(scrawl-pill)$",
+                "noshadow, class:^(scrawl-pill)$",
+                "noblur, class:^(scrawl-pill)$",
+                "move ((monitor_w-520)/2) 34, class:^(scrawl-pill)$",
+                "size 520 84, class:^(scrawl-pill)$",
+            ]
+        );
+    }
+
+    #[test]
+    fn picker_covers_its_monitor_and_review_floats_centred() {
+        assert_eq!(
+            picker_rule(),
+            r#"hl.window_rule({ match = { class = "^(scrawl-picker)$" }, float = true, pin = true, border_size = 0, no_shadow = true, no_blur = true, no_anim = true, move = { "0", "0" }, size = { "monitor_w", "monitor_h" } })"#
+        );
+        assert_eq!(
+            review_rule(1120.0, 740.0),
+            r#"hl.window_rule({ match = { class = "^(scrawl-review)$" }, float = true, center = true, size = { "1120", "740" } })"#
+        );
+        assert_eq!(
+            legacy_window_rules(1120.0, 740.0),
+            [
+                "float, class:^(scrawl-picker)$",
+                "pin, class:^(scrawl-picker)$",
+                "bordersize 0, class:^(scrawl-picker)$",
+                "noshadow, class:^(scrawl-picker)$",
+                "noblur, class:^(scrawl-picker)$",
+                "noanim, class:^(scrawl-picker)$",
+                "move 0 0, class:^(scrawl-picker)$",
+                "size monitor_w monitor_h, class:^(scrawl-picker)$",
+                "float, class:^(scrawl-review)$",
+                "center, class:^(scrawl-review)$",
+                "size 1120 740, class:^(scrawl-review)$",
+            ]
+        );
     }
 }

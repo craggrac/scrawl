@@ -152,6 +152,7 @@ pub fn pill_origin(screen: &Screen, width: f64, panel_y: f64) -> [f64; 2] {
 
 /// Every active display from CoreGraphics (any thread). `visible` is the whole frame and
 /// `safe_top` 0: only `NSScreen` knows the menu bar and the notch (`current`).
+#[cfg(target_os = "macos")]
 pub fn displays() -> Vec<Screen> {
     use core_graphics::display::CGDisplay;
     let ids = CGDisplay::active_displays().unwrap_or_default();
@@ -188,6 +189,7 @@ pub fn displays() -> Vec<Screen> {
 
 /// Every screen with its menu bar, Dock and notch, from `NSScreen` (main thread only; falls
 /// back to `displays` elsewhere).
+#[cfg(target_os = "macos")]
 pub fn current() -> Vec<Screen> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSScreen;
@@ -227,8 +229,28 @@ pub fn current() -> Vec<Screen> {
 }
 
 /// The global pointer, from `CGEvent` (any thread).
+#[cfg(target_os = "macos")]
 pub fn pointer() -> Option<[f64; 2]> {
     crate::capture::current_mouse_screen().map(|[x, y]| [f64::from(x), f64::from(y)])
+}
+
+/// Every monitor Hyprland reports (`visible` less the bars' reserved space), the one at the
+/// origin first.
+#[cfg(target_os = "linux")]
+pub fn displays() -> Vec<Screen> {
+    crate::linux::hypr::screens()
+}
+
+/// The same as `displays`: Hyprland knows the bars and has no notch.
+#[cfg(target_os = "linux")]
+pub fn current() -> Vec<Screen> {
+    displays()
+}
+
+/// The global pointer, from Hyprland.
+#[cfg(target_os = "linux")]
+pub fn pointer() -> Option<[f64; 2]> {
+    crate::linux::hypr::cursor_position().map(|(x, y)| [x, y])
 }
 
 #[cfg(test)]

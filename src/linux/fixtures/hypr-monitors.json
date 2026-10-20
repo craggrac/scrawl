@@ -1,2 +1,2 @@
-[{"id": 0, "name": "DP-1", "width": 1920, "height": 1080, "x": 0, "y": 0, "scale": 1.0, "transform": 0, "focused": true, "activeWorkspace": {"id": 1, "name": "1"}},
+[{"id": 0, "name": "DP-1", "width": 1920, "height": 1080, "x": 0, "y": 0, "scale": 1.0, "transform": 0, "focused": true, "activeWorkspace": {"id": 1, "name": "1"}, "reserved": [0, 42, 0, 0]},
  {"id": 1, "name": "HDMI-A-1", "width": 2560, "height": 1440, "x": 1920, "y": 0, "scale": 1.25, "transform": 0, "focused": false, "activeWorkspace": {"id": 5, "name": "5"}}]
