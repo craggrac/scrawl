@@ -14,7 +14,7 @@ use crate::capture::{
     CANDIDATE_BUDGET_BYTES, CANDIDATE_EDGE, FRAME_SAMPLE_INTERVAL, ScreenRecording,
 };
 use crate::helper::FrameTimes;
-use crate::model::{CaptureMode, InteractionEvent, TargetFrame, TargetInfo};
+use crate::model::{CaptureMode, InteractionEvent, RgbaFrame, TargetFrame, TargetInfo};
 
 /// How long the first frame may take before a silent screen is assumed (wf-recorder only
 /// writes on damage).
@@ -80,6 +80,45 @@ pub fn urgent_frame_times(
     times.sort_unstable();
     times.dedup();
     times
+}
+
+/// At most this many of `times` (sorted), spread evenly over them with the first and last kept.
+pub fn thin_evenly(times: Vec<u64>, max: usize) -> Vec<u64> {
+    if times.len() <= max {
+        return times;
+    }
+    match max {
+        0 => Vec::new(),
+        1 => vec![times[0]],
+        _ => (0..max)
+            .map(|i| times[i * (times.len() - 1) / (max - 1)])
+            .collect(),
+    }
+}
+
+/// How many extra frames fit a quarter of the candidate budget.
+fn urgent_frame_cap(frame_bytes: usize) -> usize {
+    (CANDIDATE_BUDGET_BYTES / 4 / frame_bytes.max(1)).max(1)
+}
+
+/// Decodes the frames at `times`; if the batch fails, one by one so a bad time loses only
+/// itself.
+fn decode_urgent(video: &Path, times: &[u64]) -> Vec<RgbaFrame> {
+    let edge = CANDIDATE_EDGE as u32;
+    if let Ok(frames) = crate::helper::frames(video, FrameTimes::At(times), edge) {
+        return frames;
+    }
+    times
+        .iter()
+        .filter_map(|t| {
+            crate::helper::frames(video, FrameTimes::At(&[*t]), edge)
+                .inspect_err(|error| {
+                    crate::capture::scrawl_log(format!("No frame at {t} ms: {error:#}"));
+                })
+                .ok()
+        })
+        .flatten()
+        .collect()
 }
 
 fn spawn(target: &TargetInfo, video: &Path, codec: &str) -> Result<Child> {
@@ -226,19 +265,16 @@ impl ScreenSession {
         if frames.is_empty() {
             bail!("No frames could be decoded from {}", self.video.display());
         }
-        let urgent = urgent_frame_times(events, self.video_offset_ms, probe.duration_ms);
+        let urgent = thin_evenly(
+            urgent_frame_times(events, self.video_offset_ms, probe.duration_ms),
+            urgent_frame_cap(width as usize * height as usize * 4),
+        );
         let wanted: Vec<u64> = urgent
             .into_iter()
             .filter(|t| frames.iter().all(|f| f.t_ms != *t))
             .collect();
         if !wanted.is_empty() {
-            match crate::helper::frames(&self.video, FrameTimes::At(&wanted), CANDIDATE_EDGE as u32)
-            {
-                Ok(extra) => frames.extend(extra),
-                Err(error) => crate::capture::scrawl_log(format!(
-                    "Frames after clicks could not be decoded: {error:#}"
-                )),
-            }
+            frames.extend(decode_urgent(&self.video, &wanted));
             frames.sort_by_key(|f| f.t_ms);
         }
         for frame in &mut frames {
@@ -326,6 +362,24 @@ mod tests {
         let events = [click(9_900), click(9_950), scroll, click(0)];
         assert_eq!(urgent_frame_times(&events, 500, 9_680), vec![0, 9_650, 9_680]);
         assert!(urgent_frame_times(&[], 0, 10_000).is_empty());
+    }
+
+    #[test]
+    fn thinning_keeps_the_ends_and_spreads_evenly() {
+        let times: Vec<u64> = (0..100).collect();
+        assert_eq!(thin_evenly(times.clone(), 200), times);
+        let thin = thin_evenly(times.clone(), 5);
+        assert_eq!(thin, vec![0, 24, 49, 74, 99]);
+        assert_eq!(thin_evenly(times.clone(), 1), vec![0]);
+        assert!(thin_evenly(times, 0).is_empty());
+    }
+
+    #[test]
+    fn the_urgent_cap_is_a_quarter_of_the_budget() {
+        let frame = 480 * 270 * 4;
+        assert!(urgent_frame_cap(frame) * frame <= CANDIDATE_BUDGET_BYTES / 4);
+        assert!(urgent_frame_cap(frame) > 100);
+        assert_eq!(urgent_frame_cap(usize::MAX), 1);
     }
 
     #[test]

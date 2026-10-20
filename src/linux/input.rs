@@ -24,6 +24,16 @@ const REL_WHEEL: u16 = 0x08;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const KEY_A: u16 = 30;
+const EV_SYN: u16 = 0x00;
+const SYN_DROPPED: u16 = 3;
+const KEY_LEFTCTRL: u16 = 29;
+const KEY_RIGHTCTRL: u16 = 97;
+const KEY_LEFTSHIFT: u16 = 42;
+const KEY_RIGHTSHIFT: u16 = 54;
+const KEY_LEFTALT: u16 = 56;
+const KEY_RIGHTALT: u16 = 100;
+const KEY_LEFTMETA: u16 = 125;
+const KEY_RIGHTMETA: u16 = 126;
 
 /// A press that moves less than this (points) before it is let go is a click, not a drag.
 const CLICK_SLOP_PT: f64 = 12.0;
@@ -43,6 +53,75 @@ pub struct RawEvent {
 /// The cursor in global logical points, if Hyprland can say.
 pub type CursorSource<'a> = &'a mut dyn FnMut() -> Option<(f64, f64)>;
 
+/// Which keyboard layout names punctuation in shortcuts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    #[default]
+    Us,
+    /// Brazilian ABNT2, whose punctuation keys sit elsewhere.
+    Br,
+}
+
+impl Layout {
+    /// From Hyprland's `layout` setting of a keyboard (`"br"`, `"br,us"`, ...).
+    pub fn from_setting(setting: &str) -> Self {
+        if setting.trim().to_ascii_lowercase().starts_with("br") {
+            Self::Br
+        } else {
+            Self::Us
+        }
+    }
+}
+
+/// Left and right modifiers are tracked apart so letting go of one while the other is held
+/// leaves the modifier held.
+#[derive(Clone, Copy, Debug, Default)]
+struct Modifiers {
+    left_ctrl: bool,
+    right_ctrl: bool,
+    left_alt: bool,
+    right_alt: bool,
+    left_shift: bool,
+    right_shift: bool,
+    left_meta: bool,
+    right_meta: bool,
+}
+
+impl Modifiers {
+    /// Updates for a modifier key; `false` if `code` is not one.
+    fn set(&mut self, code: u16, down: bool) -> bool {
+        let slot = match code {
+            KEY_LEFTCTRL => &mut self.left_ctrl,
+            KEY_RIGHTCTRL => &mut self.right_ctrl,
+            KEY_LEFTALT => &mut self.left_alt,
+            KEY_RIGHTALT => &mut self.right_alt,
+            KEY_LEFTSHIFT => &mut self.left_shift,
+            KEY_RIGHTSHIFT => &mut self.right_shift,
+            KEY_LEFTMETA => &mut self.left_meta,
+            KEY_RIGHTMETA => &mut self.right_meta,
+            _ => return false,
+        };
+        *slot = down;
+        true
+    }
+
+    fn ctrl(&self) -> bool {
+        self.left_ctrl || self.right_ctrl
+    }
+
+    fn alt(&self) -> bool {
+        self.left_alt || self.right_alt
+    }
+
+    fn shift(&self) -> bool {
+        self.left_shift || self.right_shift
+    }
+
+    fn meta(&self) -> bool {
+        self.left_meta || self.right_meta
+    }
+}
+
 struct Press {
     t: u64,
     x: f32,
@@ -56,25 +135,37 @@ struct Press {
 /// events and a fake cursor.
 pub struct Gestures {
     frame: TargetFrame,
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-    meta: bool,
+    layout: Layout,
+    mods: Modifiers,
     press: Option<Press>,
     scroll_at: Option<(u64, f64, f64)>,
+    snapshot: bool,
 }
 
 impl Gestures {
-    pub fn new(frame: TargetFrame) -> Self {
+    pub fn new(frame: TargetFrame, layout: Layout) -> Self {
         Self {
             frame,
-            ctrl: false,
-            alt: false,
-            shift: false,
-            meta: false,
+            layout,
+            mods: Modifiers::default(),
             press: None,
             scroll_at: None,
+            snapshot: false,
         }
+    }
+
+    /// Forgets held modifiers and a pending press: their release may have been missed (a
+    /// dropped device or `SYN_DROPPED`), and a modifier stuck down would make plain typing
+    /// look like shortcuts.
+    pub fn reset(&mut self) {
+        self.mods = Modifiers::default();
+        self.press = None;
+    }
+
+    /// Whether the window log should snapshot now: a press was accepted or a shortcut was
+    /// pressed since the last call (as on macOS, at the press, not the release; not for scroll).
+    pub fn take_snapshot_request(&mut self) -> bool {
+        std::mem::take(&mut self.snapshot)
     }
 
     fn contains(&self, x: f64, y: f64) -> bool {
@@ -105,6 +196,10 @@ impl Gestures {
         match raw.kind {
             EV_KEY => self.key(t, raw, cursor),
             EV_REL => self.rel(t, raw, cursor),
+            EV_SYN if raw.code == SYN_DROPPED => {
+                self.reset();
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -123,29 +218,17 @@ impl Gestures {
                     Vec::new()
                 }
             }
-            29 | 97 => {
-                self.ctrl = down;
-                Vec::new()
-            }
-            56 | 100 => {
-                self.alt = down;
-                Vec::new()
-            }
-            42 | 54 => {
-                self.shift = down;
-                Vec::new()
-            }
-            125 | 126 => {
-                self.meta = down;
-                Vec::new()
-            }
-            code if raw.value == 1 && (self.ctrl || self.meta) => key_name(code)
-                .map(|name| InteractionEvent::Key {
+            code if self.mods.set(code, down) => Vec::new(),
+            code if raw.value == 1 && (self.mods.ctrl() || self.mods.meta()) => {
+                let Some(name) = key_name(code, self.layout) else {
+                    return Vec::new();
+                };
+                self.snapshot = true;
+                vec![InteractionEvent::Key {
                     t,
                     shortcut: self.chord(name),
-                })
-                .into_iter()
-                .collect(),
+                }]
+            }
             _ => Vec::new(),
         }
     }
@@ -153,10 +236,10 @@ impl Gestures {
     fn chord(&self, name: &str) -> String {
         let mut chord = String::new();
         for (held, label) in [
-            (self.ctrl, "Ctrl+"),
-            (self.alt, "Alt+"),
-            (self.shift, "Shift+"),
-            (self.meta, "Super+"),
+            (self.mods.ctrl(), "Ctrl+"),
+            (self.mods.alt(), "Alt+"),
+            (self.mods.shift(), "Shift+"),
+            (self.mods.meta(), "Super+"),
         ] {
             if held {
                 chord.push_str(label);
@@ -168,10 +251,16 @@ impl Gestures {
 
     fn pointer_down(&mut self, t: u64, right: bool, cursor: CursorSource<'_>) {
         self.press = None;
+        // A Shift-press is never a click (macOS: Shift-click drops a pin, Shift-drag is ink;
+        // phase 5 turns these into pins and ink here too).
+        if self.mods.shift() && !(self.mods.ctrl() || self.mods.alt() || self.mods.meta()) {
+            return;
+        }
         let Some((gx, gy)) = cursor() else { return };
         if !self.contains(gx, gy) {
             return;
         }
+        self.snapshot = true;
         let [x, y] = self.normalize(gx, gy);
         self.press = Some(Press {
             t,
@@ -275,8 +364,25 @@ impl Gestures {
     }
 }
 
-/// US name of an evdev key code, for shortcuts; `None` for keys we do not name.
-pub fn key_name(code: u16) -> Option<&'static str> {
+/// Name of an evdev key code in `layout`, for shortcuts; `None` for keys we do not name.
+pub fn key_name(code: u16, layout: Layout) -> Option<&'static str> {
+    if layout == Layout::Br {
+        let name = match code {
+            26 => "´",
+            27 => "[",
+            39 => "Ç",
+            40 => "~",
+            41 => "'",
+            43 => "]",
+            53 => ";",
+            86 => "\\",
+            89 => "/",
+            _ => "",
+        };
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
     const ROW_Q: [&str; 10] = ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"];
     const ROW_A: [&str; 9] = ["A", "S", "D", "F", "G", "H", "J", "K", "L"];
     const ROW_Z: [&str; 7] = ["Z", "X", "C", "V", "B", "N", "M"];
@@ -301,7 +407,7 @@ pub fn key_name(code: u16) -> Option<&'static str> {
         39 => ";",
         40 => "'",
         41 => "`",
-        43 => "\\",
+        43 | 86 => "\\",
         44..=50 => ROW_Z[c - 44],
         51 => ",",
         52 => ".",
@@ -436,13 +542,17 @@ pub struct InputRecorder {
 }
 
 impl InputRecorder {
-    /// `request` is raised on each click, drag and shortcut so the window log snapshots then.
+    /// `request` is raised when a click or drag starts and on each shortcut, so the window log
+    /// snapshots then. The keyboard layout is read once, here.
     pub fn start(frame: TargetFrame, started_at: Instant, request: Arc<AtomicBool>) -> Self {
+        let layout = super::hypr::keyboard_layout()
+            .map_or(Layout::Us, |setting| Layout::from_setting(&setting));
+        super::hypr::reset_cursor_error_log();
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopping);
         let worker = thread::Builder::new()
             .name("scrawl-input".into())
-            .spawn(move || run(frame, started_at, &request, &stop))
+            .spawn(move || run(frame, layout, started_at, &request, &stop))
             .ok();
         Self { stopping, worker }
     }
@@ -463,6 +573,7 @@ impl InputRecorder {
 
 fn run(
     frame: TargetFrame,
+    layout: Layout,
     started_at: Instant,
     request: &AtomicBool,
     stopping: &AtomicBool,
@@ -472,7 +583,7 @@ fn run(
         scrawl_log("Input: no readable /dev/input device (is the user in the input group?)");
         return Vec::new();
     }
-    let mut gestures = Gestures::new(frame);
+    let mut gestures = Gestures::new(frame, layout);
     let mut events = Vec::new();
     let mut cursor = || super::hypr::cursor_position();
     while !stopping.load(Ordering::Acquire) {
@@ -484,13 +595,14 @@ fn run(
             };
             for raw in raws {
                 let t = started_at.elapsed().as_millis() as u64;
-                for event in gestures.handle(t, raw, &mut cursor) {
-                    if !matches!(event, InteractionEvent::Scroll { .. }) {
-                        request.store(true, Ordering::Release);
-                    }
-                    events.push(event);
+                events.extend(gestures.handle(t, raw, &mut cursor));
+                if gestures.take_snapshot_request() {
+                    request.store(true, Ordering::Release);
                 }
             }
+        }
+        if !gone.is_empty() {
+            gestures.reset();
         }
         for index in gone.into_iter().rev() {
             devices.swap_remove(index);
@@ -536,7 +648,7 @@ mod tests {
     impl Rig {
         fn new() -> Self {
             Self {
-                gestures: Gestures::new(frame()),
+                gestures: Gestures::new(frame(), Layout::Us),
                 at: Cell::new(Some((600.0, 300.0))),
                 out: Vec::new(),
             }
@@ -721,19 +833,19 @@ mod tests {
 
     #[test]
     fn key_names() {
-        assert_eq!(key_name(30), Some("A"));
-        assert_eq!(key_name(44), Some("Z"));
-        assert_eq!(key_name(11), Some("0"));
-        assert_eq!(key_name(2), Some("1"));
-        assert_eq!(key_name(59), Some("F1"));
-        assert_eq!(key_name(88), Some("F12"));
-        assert_eq!(key_name(183), Some("F13"));
-        assert_eq!(key_name(194), Some("F24"));
-        assert_eq!(key_name(57), Some("Space"));
-        assert_eq!(key_name(109), Some("PageDown"));
-        assert_eq!(key_name(53), Some("/"));
-        assert_eq!(key_name(0), None);
-        assert_eq!(key_name(29), None);
+        assert_eq!(key_name(30, Layout::Us), Some("A"));
+        assert_eq!(key_name(44, Layout::Us), Some("Z"));
+        assert_eq!(key_name(11, Layout::Us), Some("0"));
+        assert_eq!(key_name(2, Layout::Us), Some("1"));
+        assert_eq!(key_name(59, Layout::Us), Some("F1"));
+        assert_eq!(key_name(88, Layout::Us), Some("F12"));
+        assert_eq!(key_name(183, Layout::Us), Some("F13"));
+        assert_eq!(key_name(194, Layout::Us), Some("F24"));
+        assert_eq!(key_name(57, Layout::Us), Some("Space"));
+        assert_eq!(key_name(109, Layout::Us), Some("PageDown"));
+        assert_eq!(key_name(53, Layout::Us), Some("/"));
+        assert_eq!(key_name(0, Layout::Us), None);
+        assert_eq!(key_name(29, Layout::Us), None);
     }
 
     #[test]
@@ -754,5 +866,118 @@ mod tests {
         assert!(bit_set(&bits, BTN_LEFT));
         assert!(!bit_set(&bits, KEY_A));
         assert!(!bit_set(&bits[..4], BTN_LEFT));
+    }
+
+    fn shortcuts(out: &[InteractionEvent]) -> Vec<&str> {
+        out.iter()
+            .filter_map(|e| match e {
+                InteractionEvent::Key { shortcut, .. } => Some(shortcut.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_missed_release_then_syn_dropped_leaves_typing_unrecorded() {
+        let mut rig = Rig::new();
+        rig.feed(1, key(KEY_LEFTCTRL, 1));
+        // The release was lost; the kernel says so.
+        rig.feed(2, RawEvent { kind: EV_SYN, code: SYN_DROPPED, value: 0 });
+        for code in [37, 38, 28] {
+            rig.feed(3, key(code, 1));
+        }
+        assert!(rig.out.is_empty(), "{:?}", rig.out);
+    }
+
+    #[test]
+    fn reset_forgets_modifiers_and_a_pending_press() {
+        let mut rig = Rig::new();
+        rig.feed(1, key(KEY_LEFTMETA, 1));
+        rig.feed(2, key(BTN_LEFT, 1));
+        rig.gestures.reset();
+        rig.feed(3, key(37, 1));
+        rig.feed(4, key(BTN_LEFT, 0));
+        assert!(rig.out.is_empty(), "{:?}", rig.out);
+    }
+
+    #[test]
+    fn left_and_right_modifiers_overlap() {
+        let mut rig = Rig::new();
+        rig.feed(1, key(KEY_LEFTCTRL, 1));
+        rig.feed(2, key(KEY_RIGHTCTRL, 1));
+        rig.feed(3, key(KEY_LEFTCTRL, 0));
+        rig.feed(4, key(37, 1));
+        rig.feed(5, key(KEY_RIGHTCTRL, 0));
+        rig.feed(6, key(37, 1));
+        assert_eq!(shortcuts(&rig.out), ["Ctrl+K"]);
+    }
+
+    #[test]
+    fn snapshot_is_requested_at_an_accepted_press_and_a_shortcut_only() {
+        let mut rig = Rig::new();
+        assert!(!rig.gestures.take_snapshot_request());
+        rig.feed(1, key(BTN_LEFT, 1));
+        assert!(rig.gestures.take_snapshot_request());
+        assert!(!rig.gestures.take_snapshot_request(), "taken once");
+        rig.feed(2, key(BTN_LEFT, 0));
+        assert!(!rig.gestures.take_snapshot_request(), "not at the release");
+        rig.feed(3, rel(REL_WHEEL, -1));
+        assert!(!rig.gestures.take_snapshot_request(), "not for scroll");
+        rig.at.set(Some((5.0, 5.0)));
+        rig.feed(4, key(BTN_LEFT, 1));
+        assert!(!rig.gestures.take_snapshot_request(), "not outside the target");
+        rig.feed(5, key(KEY_LEFTCTRL, 1));
+        rig.feed(6, key(37, 1));
+        assert!(rig.gestures.take_snapshot_request());
+        rig.feed(7, key(38, 0));
+        assert!(!rig.gestures.take_snapshot_request());
+    }
+
+    #[test]
+    fn a_shift_press_is_not_a_click_or_drag_but_ctrl_shift_is() {
+        let mut rig = Rig::new();
+        rig.feed(1, key(KEY_RIGHTSHIFT, 1));
+        rig.feed(2, key(BTN_LEFT, 1));
+        rig.at.set(Some((900.0, 300.0)));
+        rig.feed(3, key(BTN_LEFT, 0));
+        assert!(rig.out.is_empty());
+        assert!(!rig.gestures.take_snapshot_request());
+        rig.feed(4, key(KEY_LEFTCTRL, 1));
+        rig.at.set(Some((600.0, 300.0)));
+        rig.feed(5, key(BTN_LEFT, 1));
+        rig.feed(6, key(BTN_LEFT, 0));
+        assert!(matches!(rig.out[..], [InteractionEvent::Click { .. }]));
+    }
+
+    #[test]
+    fn abnt2_punctuation_has_its_own_names() {
+        let br = Layout::Br;
+        let expected = [
+            (26, "´"),
+            (27, "["),
+            (39, "Ç"),
+            (40, "~"),
+            (41, "'"),
+            (43, "]"),
+            (53, ";"),
+            (86, "\\"),
+            (89, "/"),
+        ];
+        for (code, name) in expected {
+            assert_eq!(key_name(code, br), Some(name), "code {code}");
+        }
+        assert_eq!(key_name(30, br), Some("A"));
+        assert_eq!(key_name(26, Layout::Us), Some("["));
+        assert_eq!(key_name(39, Layout::Us), Some(";"));
+        assert_eq!(key_name(86, Layout::Us), Some("\\"));
+        assert_eq!(key_name(89, Layout::Us), None);
+    }
+
+    #[test]
+    fn layout_follows_the_hyprland_setting() {
+        assert_eq!(Layout::from_setting("br"), Layout::Br);
+        assert_eq!(Layout::from_setting("BR,us"), Layout::Br);
+        assert_eq!(Layout::from_setting("us"), Layout::Us);
+        assert_eq!(Layout::from_setting(""), Layout::Us);
     }
 }

@@ -42,7 +42,8 @@ While recording, Scrawl notes clicks, drags, scrolling and Ctrl/Super shortcuts 
 down". It never records typing: plain keys, and Shift or Alt combinations, are not looked at.
 This needs read access to `/dev/input/event*`, which on most distributions means being in the
 `input` group (`sudo usermod -aG input $USER`, then log in again). Without it recording still
-works, just without these events.
+works, just without these events. Touchpad taps and two-finger scrolling are not seen (libinput
+synthesizes them above evdev); physical buttons and mouse wheels are.
 
 ## Agents
 

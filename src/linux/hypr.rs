@@ -91,9 +91,52 @@ fn hypr_json<T: DeserializeOwned>(command: &str) -> Result<T> {
     serde_json::from_slice(&reply).with_context(|| format!("Invalid Hyprland reply to {command}"))
 }
 
-/// The cursor in global logical points.
+/// Set once a cursor lookup failure has been logged, so a recording logs the first only.
+static CURSOR_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Lets the next recording log its first cursor failure.
+pub fn reset_cursor_error_log() {
+    CURSOR_ERROR_LOGGED.store(false, Ordering::Release);
+}
+
+/// The cursor in global logical points. The first failure of a recording is logged.
 pub fn cursor_position() -> Option<(f64, f64)> {
-    hypr_json::<CursorPos>("cursorpos").ok().map(|c| (c.x, c.y))
+    match hypr_json::<CursorPos>("cursorpos") {
+        Ok(c) => Some((c.x, c.y)),
+        Err(error) => {
+            if !CURSOR_ERROR_LOGGED.swap(true, Ordering::AcqRel) {
+                scrawl_log(format!("Cursor position unavailable: {error:#}"));
+            }
+            None
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct Keyboard {
+    layout: String,
+    #[serde(default)]
+    main: bool,
+}
+
+#[derive(Deserialize)]
+struct Devices {
+    keyboards: Vec<Keyboard>,
+}
+
+/// The `layout` setting of the main keyboard, else the first.
+fn main_keyboard_layout(devices: &Devices) -> Option<String> {
+    devices
+        .keyboards
+        .iter()
+        .find(|k| k.main)
+        .or_else(|| devices.keyboards.first())
+        .map(|k| k.layout.clone())
+}
+
+/// The keyboard layout Hyprland uses (`"us"`, `"br"`, ...), if it can say.
+pub fn keyboard_layout() -> Option<String> {
+    main_keyboard_layout(&hypr_json::<Devices>("devices").ok()?)
 }
 
 /// A monitor's area in logical points (rotated monitors swap sides).
@@ -311,6 +354,20 @@ mod tests {
 
     fn clients() -> Vec<Client> {
         serde_json::from_slice(include_bytes!("fixtures/hypr-clients.json")).unwrap()
+    }
+
+    #[test]
+    fn keyboard_layout_is_the_main_keyboards() {
+        let json = r#"{"mice":[],"keyboards":[
+            {"address":"0x1","name":"power-button","layout":"us","main":false},
+            {"address":"0x2","name":"kbd","layout":"br,us","main":true}],"tablets":[]}"#;
+        let devices: Devices = serde_json::from_str(json).unwrap();
+        assert_eq!(main_keyboard_layout(&devices).as_deref(), Some("br,us"));
+        let none_main: Devices =
+            serde_json::from_str(r#"{"keyboards":[{"layout":"de"}]}"#).unwrap();
+        assert_eq!(main_keyboard_layout(&none_main).as_deref(), Some("de"));
+        let empty: Devices = serde_json::from_str(r#"{"keyboards":[]}"#).unwrap();
+        assert_eq!(main_keyboard_layout(&empty), None);
     }
 
     #[test]
