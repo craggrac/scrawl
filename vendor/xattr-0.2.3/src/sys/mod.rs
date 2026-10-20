@@ -8,11 +8,16 @@ macro_rules! platforms {
             #[cfg(any($(target_os = $platform),*))]
             pub use self::$module::*;
 
-            #[cfg(any($(target_os = $platform),*))]
             // libc 0.2.190+ no longer defines ENOATTR on Linux; it is ENODATA there.
-            #[cfg(any(target_os = "linux", target_os = "android"))]
+            #[cfg(all(
+                any($(target_os = $platform),*),
+                any(target_os = "linux", target_os = "android")
+            ))]
             pub const ENOATTR: ::libc::c_int = ::libc::ENODATA;
-            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            #[cfg(all(
+                any($(target_os = $platform),*),
+                not(any(target_os = "linux", target_os = "android"))
+            ))]
             pub const ENOATTR: ::libc::c_int = ::libc::ENOATTR;
         )*
 
