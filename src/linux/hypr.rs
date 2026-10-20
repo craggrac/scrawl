@@ -122,21 +122,35 @@ fn hypr_command(command: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether Hyprland's reply to an `eval` means it has no Lua `eval` at all (a Hyprland before
+/// 0.53 answers "unknown request"; one that knows `eval` but parses a legacy config says so),
+/// rather than that one Lua chunk failed (`error: …`).
+fn eval_unsupported(reply: &str) -> bool {
+    reply == "unknown request" || reply.contains("legacy parser")
+}
+
 /// Installs Scrawl's window rules for this Hyprland session (the user's config is never
 /// edited): the capsule floats top-centre, the picker covers its monitor, the review window
 /// floats centred. Lua (`eval`) first, `keyword windowrulev2` on Hyprland before 0.53.
 pub fn install_window_rules(pill: [f32; 3], review: [f32; 2]) {
     let [width, height, top] = pill;
     let lua = [pill_rule(width, height, top), picker_rule(), review_rule(review[0], review[1])];
-    let failed: Vec<String> = lua
-        .iter()
-        .filter_map(|rule| hypr_command(&format!("eval {rule}")).err())
-        .map(|error| format!("{error:#}"))
-        .collect();
-    if failed.is_empty() {
-        return;
+    for rule in &lua {
+        let Err(error) = hypr_command(&format!("eval {rule}")) else {
+            continue;
+        };
+        let error = format!("{error:#}");
+        if eval_unsupported(&error) {
+            scrawl_log(format!("Hyprland has no Lua eval ({error}); trying windowrulev2"));
+            return install_legacy_window_rules(pill, review);
+        }
+        scrawl_log(format!("Hyprland rule (Lua) {rule:?}: {error}"));
     }
-    scrawl_log(format!("Hyprland rules (Lua): {}; trying windowrulev2", failed.join("; ")));
+}
+
+/// `install_window_rules` for a Hyprland without `eval`.
+fn install_legacy_window_rules(pill: [f32; 3], review: [f32; 2]) {
+    let [width, height, top] = pill;
     let legacy = legacy_pill_rules(width, height, top)
         .into_iter()
         .chain(legacy_window_rules(review[0], review[1]));
@@ -152,9 +166,11 @@ pub fn focus_window(address: &str) {
     let lua = format!(
         "eval hl.dispatch(hl.dsp.focus({{ window = \"address:{address}\" }}))"
     );
-    if let Err(error) = hypr_command(&lua)
-        .or_else(|_| hypr_command(&format!("dispatch focuswindow address:{address}")))
-    {
+    let Err(lua_error) = hypr_command(&lua) else {
+        return;
+    };
+    scrawl_log(format!("Hyprland: Lua focus of {address}: {lua_error:#}; trying dispatch"));
+    if let Err(error) = hypr_command(&format!("dispatch focuswindow address:{address}")) {
         scrawl_log(format!("Hyprland: could not focus {address}: {error:#}"));
     }
 }
@@ -691,6 +707,16 @@ pub fn legacy_window_rules(review_width: f32, review_height: f32) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_missing_eval_falls_back_to_windowrulev2() {
+        assert!(eval_unsupported("unknown request"));
+        assert!(eval_unsupported("eval can't work with legacy parsers. Use keyword."));
+        assert!(!eval_unsupported(
+            "error: [string \"hl.window_rule(\"]:1: unexpected symbol near <eof>"
+        ));
+        assert!(!eval_unsupported("ok"));
+    }
 
     fn monitors() -> Vec<Monitor> {
         serde_json::from_slice(include_bytes!("fixtures/hypr-monitors.json")).unwrap()
