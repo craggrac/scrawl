@@ -1,6 +1,7 @@
 //! Linux backends for what macOS does with ScreenCaptureKit, AppKit and `scrawl-helper`, and
 //! the headless recording flow a Hyprland key bind drives through `scrawl toggle`.
 
+pub mod control;
 pub mod hypr;
 pub mod input;
 pub mod media;

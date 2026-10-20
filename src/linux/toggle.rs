@@ -16,11 +16,26 @@ pub enum Toggle {
     Start,
 }
 
-/// Where the running recorder's pid is kept: a per-user directory, never the shared temp dir.
-pub fn pidfile() -> Option<PathBuf> {
+/// Scrawl's per-user runtime directory (`$XDG_RUNTIME_DIR/scrawl`, else under the state dir),
+/// never the shared temp dir. It holds the recorder's pidfile and the app's control socket.
+pub fn runtime_dir() -> Option<PathBuf> {
     dirs::runtime_dir()
         .or_else(dirs::state_dir)
-        .map(|dir| dir.join("scrawl/record.pid"))
+        .map(|dir| dir.join("scrawl"))
+}
+
+/// Creates `runtime_dir` owner-only (0700) if it isn't there.
+pub fn create_runtime_dir(dir: &Path) -> Result<()> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .with_context(|| format!("Could not create {}", dir.display()))
+}
+
+/// Where the running recorder's pid is kept.
+pub fn pidfile() -> Option<PathBuf> {
+    runtime_dir().map(|dir| dir.join("record.pid"))
 }
 
 /// Stop the pid in the file if `is_recorder` says it is still our recorder; else start one.
@@ -39,8 +54,12 @@ fn is_recorder(pid: i32) -> bool {
     })
 }
 
-/// Start a recording, or stop the running one.
+/// Start a recording, or stop the running one. A running `scrawl app` gets the press instead
+/// (`control::send`); without one, the headless recorder below.
 pub fn toggle() -> Result<()> {
+    if super::control::send(super::control::Command::Toggle)? {
+        return Ok(());
+    }
     let Some(path) = pidfile() else {
         bail!("No per-user runtime or state directory for the pidfile");
     };
@@ -54,11 +73,7 @@ pub fn toggle() -> Result<()> {
             let _ = std::fs::remove_file(&path);
         }
         Toggle::Start => {
-            let parent = path.parent().context("pidfile has no parent")?;
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)?;
+            create_runtime_dir(path.parent().context("pidfile has no parent")?)?;
             let mut child = Command::new(std::env::current_exe()?)
                 .args(["record", "--until-stopped"])
                 .stdin(Stdio::null())
