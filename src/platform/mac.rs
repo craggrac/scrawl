@@ -11,7 +11,10 @@ pub use crate::capture::{
     screen_capture_usable, selectable_window_at, set_escape_hotkey_enabled,
     shortcut_from_key_and_mods, shortcut_parts, start_global_input_tap, update_global_shortcut,
 };
+pub use crate::handoff::native_pill;
+pub use crate::helper::devices as phone_devices;
 pub use crate::laser_overlay::MetalLaserOverlay;
+pub use crate::native::pill::NativePill;
 use crate::model::TargetInfo;
 pub use crate::phone::PhoneSession;
 pub use crate::windows::WindowLogger;

@@ -2,6 +2,8 @@
 //! GPUI's windows (floating, non-activating, the capsule's CALayer shell), handing the keys back
 //! to the app that had them, and the screenshot `scrawl app --screenshot` takes.
 
+use std::cell::RefCell;
+
 use super::*;
 
 use objc2::rc::Retained;

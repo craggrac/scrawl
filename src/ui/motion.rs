@@ -209,12 +209,39 @@ pub(super) const PRESETS: &[(&str, &[(&str, f32)])] = &[
     ("Glass", &[("pill.glass", 1.0)]),
 ];
 
+/// Capsule visual style (`pillStyle: "black" | "glass"`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PillStyle {
+    #[default]
+    Black,
+    Glass,
+}
+
+#[allow(dead_code)]
+impl PillStyle {
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "glass" | "liquid" | "liquid-glass" | "1" | "true" => Some(Self::Glass),
+            "black" | "dark" | "metal" | "0" | "false" => Some(Self::Black),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Black => "black",
+            Self::Glass => "glass",
+        }
+    }
+}
+
 impl Tune {
-    pub fn pill_style_override(&self) -> Option<crate::native::pill::PillStyle> {
+    #[cfg(target_os = "macos")]
+    pub fn pill_style_override(&self) -> Option<PillStyle> {
         if self.pill_glass >= 0.5 {
-            Some(crate::native::pill::PillStyle::Glass)
+            Some(PillStyle::Glass)
         } else if self.pill_glass >= -0.5 {
-            Some(crate::native::pill::PillStyle::Black)
+            Some(PillStyle::Black)
         } else {
             None
         }
@@ -250,11 +277,11 @@ impl Tune {
             for (key, v) in map {
                 if key == "pillStyle"
                     && let Some(s) = v.as_str()
-                    && let Some(style) = crate::native::pill::PillStyle::from_str_opt(s)
+                    && let Some(style) = PillStyle::from_str_opt(s)
                 {
                     tune.pill_glass = match style {
-                        crate::native::pill::PillStyle::Black => 0.0,
-                        crate::native::pill::PillStyle::Glass => 1.0,
+                        PillStyle::Black => 0.0,
+                        PillStyle::Glass => 1.0,
                     };
                 } else if let Some(v) = v.as_f64() {
                     tune.set(key, v as f32);
@@ -464,7 +491,7 @@ pub(crate) fn tune_command(action: TuneAction) -> anyhow::Result<()> {
 /// scale about the window centre and its drop, then the window's screen origin. `clip` is the
 /// shell (the capsule clips its content), in screen points.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Xf {
+pub(crate) struct Xf {
     pub s: f32,
     pub cx: f32,
     pub cy: f32,
@@ -662,6 +689,7 @@ fn visible(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 }
 
 /// A scalar per frame: `kind` is motion-lint's `level`, `phase` or `position`.
+#[cfg(target_os = "macos")]
 pub(crate) fn trace_channel(name: &'static str, kind: &'static str, value: f32) {
     TRACE.with_borrow_mut(|slot| {
         if let Some(pending) = slot.as_mut().and_then(|t| t.pending.as_mut()) {

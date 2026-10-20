@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::capture::scrawl_log;
+#[cfg(any(target_os = "macos", test))]
 use crate::model::{ScrawlBundle, format_clock};
 
 const CAPACITY: usize = 8;
@@ -23,6 +24,7 @@ pub struct InboxEntry {
 }
 
 impl InboxEntry {
+    #[cfg(any(target_os = "macos", test))]
     pub fn new(dir: &Path, bundle: &ScrawlBundle, source: &str, received_at_ms: u64) -> Self {
         Self {
             dir: dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()),
@@ -35,6 +37,7 @@ impl InboxEntry {
     }
 
     /// `UpDown · 0:25 · 5 frames · 2 min ago`
+    #[cfg(any(target_os = "macos", test))]
     pub fn label(&self, now_ms: u64) -> String {
         let name = self.app.as_deref().unwrap_or(match self.source.as_str() {
             "iphone" => "iPhone",
@@ -54,6 +57,7 @@ impl InboxEntry {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn relative_age(age_ms: u64) -> String {
     let minutes = age_ms / 60_000;
     match minutes {
@@ -101,6 +105,7 @@ impl Inbox {
     }
 
     /// Newest first.
+    #[cfg(any(target_os = "macos", test))]
     pub fn entries(&self) -> &[InboxEntry] {
         &self.entries
     }
@@ -109,10 +114,12 @@ impl Inbox {
         self.entries.len()
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub fn newest(&self) -> Option<&InboxEntry> {
         self.entries.first()
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub fn add(&mut self, entry: InboxEntry) {
         self.entries.retain(|e| !same_dir(&e.dir, &entry.dir));
         self.entries.insert(0, entry);

@@ -410,7 +410,6 @@ pub fn describe_event(event: &InteractionEvent) -> String {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
 pub fn timeline(bundle: &ScrawlBundle) -> Vec<String> {
     let mut items: Vec<(u64, String)> = bundle
         .transcript

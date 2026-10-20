@@ -7,3 +7,7 @@
 mod mac;
 #[cfg(target_os = "macos")]
 pub use mac::*;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::*;

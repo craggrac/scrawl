@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,6 +58,15 @@ const SEG_ICON: f32 = 14.0;
 const SEG_ICON_GAP: f32 = 5.0;
 const PILL_WINDOW_W: f32 = 520.0;
 const PILL_WINDOW_H: f32 = 84.0;
+/// The capsule window's top, below the top of its display.
+const PILL_WINDOW_TOP: f32 = 34.0;
+const REVIEW_WINDOW_W: f32 = 1120.0;
+const REVIEW_WINDOW_H: f32 = 740.0;
+/// Wayland app ids of Scrawl's windows: Hyprland's window rules match them (macOS ignores
+/// them).
+const PILL_APP_ID: &str = "scrawl-pill";
+const PICKER_APP_ID: &str = "scrawl-picker";
+const REVIEW_APP_ID: &str = "scrawl-review";
 
 #[cfg(target_os = "macos")]
 mod appkit;
@@ -67,6 +75,8 @@ pub(crate) mod motion;
 
 #[cfg(target_os = "macos")]
 use appkit::*;
+#[cfg(target_os = "linux")]
+use crate::platform::chrome::*;
 
 pub use lab::{Options as LabOptions, Scene as LabScene, run as run_lab};
 pub(crate) use motion::{TuneAction, tune_command};
@@ -209,6 +219,7 @@ fn clock_template(clock: &str) -> String {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 fn completed_meta(_duration_ms: u64, frame_count: usize) -> String {
     format!(
@@ -230,6 +241,7 @@ fn completed_label(inbox_count: usize, note: Option<&str>) -> String {
 }
 
 /// How long a smart-routed capture waits, showing "Sending to …", before it is sent.
+#[cfg(target_os = "macos")]
 const SMART_SEND_UNDO: Duration = Duration::from_millis(3_000);
 
 /// A session title short enough for the island.
@@ -418,6 +430,7 @@ fn island_content_width(
     inner + 2.0 * ISLAND_INSET
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum MenuAction {
     ToggleCapture,
@@ -431,11 +444,14 @@ enum MenuAction {
 }
 
 /// Text beside the menu bar icon while a video export runs (`None` goes back to the inbox count).
+#[cfg(target_os = "macos")]
 static EXPORT_STATUS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(target_os = "macos")]
 static EXPORTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Exports the newest bundle to `~/Movies/Scrawl/<name>.mp4` off the main thread, reporting
 /// through `EXPORT_STATUS`, then reveals the file in Finder.
+#[cfg(target_os = "macos")]
 fn start_video_export() {
     use std::sync::atomic::Ordering;
     if EXPORTING.swap(true, Ordering::SeqCst) {
@@ -486,6 +502,7 @@ fn start_video_export() {
 }
 
 /// The content layer's scale: the capsule's, less a little per px of blur.
+#[cfg(target_os = "macos")]
 fn content_scale(scale: f32, blur_radius: f32, content_shrink: f32) -> f64 {
     let s = f64::from(scale.clamp(0.50, 1.15));
     (s * (1.0 - f64::from(blur_radius).min(5.0) * f64::from(content_shrink))).clamp(0.85, 1.06)
@@ -558,7 +575,7 @@ pub struct ScrawlCoordinator {
     telemetry: Arc<SharedCaptureTelemetry>,
     active_recording: Option<ActiveRecording>,
     picker_metal_overlay: Option<MetalLaserOverlay>,
-    native_pill: Option<crate::native::pill::NativePill>,
+    native_pill: Option<crate::platform::NativePill>,
     iphone_preview: Option<PhoneSession>,
     island_phase: IslandPhase,
     island_prev_phase: IslandPhase,
@@ -632,12 +649,16 @@ pub struct ScrawlCoordinator {
     /// seen yet: switch to the phone when discovery finds one, unless Kit picked a mode himself.
     open_iphone_when_found: bool,
     /// The welcome window, while it's open (`crate::onboarding`).
+    #[cfg(target_os = "macos")]
     onboarding: Option<crate::onboarding::Session>,
     /// The Settings window, while it's open (`crate::settings`).
+    #[cfg(target_os = "macos")]
     settings: Option<crate::settings::Session>,
     /// The last fresh read of what macOS has granted (at launch, then while onboarding is open).
+    #[cfg(target_os = "macos")]
     grants: Option<crate::onboarding::Grants>,
     /// Holds the permissions window until the shortcut's modifiers are up.
+    #[cfg(target_os = "macos")]
     gate: crate::onboarding::Gate,
     /// ⌥⇧S held as a ⌘Tab-style switcher (`crate::hold`).
     switcher: crate::hold::Switcher,
@@ -714,9 +735,13 @@ impl ScrawlCoordinator {
             inbox: crate::inbox::Inbox::load_default(),
             last_mode: SelectionMode::load_last_used(),
             open_iphone_when_found: false,
+            #[cfg(target_os = "macos")]
             onboarding: None,
+            #[cfg(target_os = "macos")]
             settings: None,
+            #[cfg(target_os = "macos")]
             grants: None,
+            #[cfg(target_os = "macos")]
             gate: crate::onboarding::Gate::default(),
             switcher: crate::hold::Switcher::default(),
             hold_mods: 0,
@@ -735,6 +760,7 @@ impl ScrawlCoordinator {
     }
 
     /// Records a capture received from elsewhere; returns the unhandled count.
+    #[cfg(target_os = "macos")]
     fn add_to_inbox(&mut self, dir: &std::path::Path, bundle: &ScrawlBundle) -> usize {
         let source = bundle.source.as_deref().unwrap_or("iphone");
         self.inbox.add(crate::inbox::InboxEntry::new(
@@ -756,6 +782,7 @@ impl ScrawlCoordinator {
 
     /// What ⌥⇧V pastes: the bundle on the Completed island, else the newest unhandled iPhone
     /// capture unless this Mac captured something since, else the latest bundle.
+    #[cfg(target_os = "macos")]
     fn take_paste_target(&mut self) -> PathBuf {
         let showing = matches!(self.island_phase, IslandPhase::Completed { .. })
             .then(|| self.completed_dir.clone())
@@ -772,6 +799,7 @@ impl ScrawlCoordinator {
         dir
     }
 
+    #[cfg(target_os = "macos")]
     pub fn paste_latest(&mut self, cx: &mut Context<Self>) {
         // Without Accessibility macOS drops the posted ⌘V (onboarding asks for it, but it can be
         // turned off later); bring the permissions window instead.
@@ -798,7 +826,7 @@ impl ScrawlCoordinator {
             let found = cx
                 .background_executor()
                 .spawn(async {
-                    crate::helper::devices()
+                    crate::platform::phone_devices()
                         .inspect_err(|error| scrawl_log(format!("iPhone discovery: {error:#}")))
                         .ok()
                         .and_then(|devices| devices.into_iter().next())
@@ -837,6 +865,7 @@ impl ScrawlCoordinator {
         matches!(self.island_phase, IslandPhase::Selecting { .. })
     }
 
+    #[cfg(target_os = "macos")]
     pub fn open_onboarding(&mut self, flow: crate::onboarding::Flow) {
         // Drop the old window before the new one opens.
         self.onboarding = None;
@@ -851,6 +880,7 @@ impl ScrawlCoordinator {
     }
 
     /// Opens Settings, or brings it forward on `pane`.
+    #[cfg(target_os = "macos")]
     pub fn open_settings(&mut self, pane: Option<crate::settings::Pane>) {
         if let Some(session) = self.settings.as_mut() {
             session.show(pane);
@@ -871,6 +901,13 @@ impl ScrawlCoordinator {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    /// Settings come to Linux later (phase 4 part 2).
+    pub fn open_settings(&mut self) {
+        scrawl_log("Settings aren't available on Linux yet");
+    }
+
+    #[cfg(target_os = "macos")]
     fn settings_event(&mut self, event: crate::settings::Event, cx: &mut Context<Self>) {
         use crate::settings::{Effect, Event};
         if let Event::Grants(grants) = &event {
@@ -899,6 +936,7 @@ impl ScrawlCoordinator {
 
     /// Keeps a fresh read of the grants and remembers what was granted. (The key tap follows
     /// Accessibility by itself, in the HID poller.)
+    #[cfg(target_os = "macos")]
     fn note_grants(&mut self, grants: &crate::onboarding::Grants) {
         use crate::onboarding::Progress;
         let mut progress = Progress::load();
@@ -909,6 +947,7 @@ impl ScrawlCoordinator {
     }
 
     /// Required permissions that keep a capture from starting now.
+    #[cfg(target_os = "macos")]
     fn missing_to_record(&mut self) -> Vec<crate::onboarding::Permission> {
         use crate::onboarding::{Permission, missing_to_record};
         let screen = crate::platform::screen_capture_usable(false);
@@ -926,6 +965,7 @@ impl ScrawlCoordinator {
 
     /// Whether this may go on: with a required permission off it starts nothing, and the
     /// permissions window comes forward once the modifiers are up.
+    #[cfg(target_os = "macos")]
     fn ready_to_record(&mut self) -> bool {
         if self.lab {
             return true;
@@ -941,8 +981,15 @@ impl ScrawlCoordinator {
         false
     }
 
+    #[cfg(target_os = "linux")]
+    /// Linux asks no permission for a capture.
+    fn ready_to_record(&mut self) -> bool {
+        true
+    }
+
     /// Whether `permission`, asked for on first use (Camera, Accessibility), is on. If not, its
     /// window comes forward once the modifiers are up.
+    #[cfg(target_os = "macos")]
     fn ready_for(&mut self, permission: crate::onboarding::Permission) -> bool {
         let granted = |g: &crate::onboarding::Grants| g.granted(permission);
         if self.lab || self.grants.as_ref().is_none_or(granted) {
@@ -960,6 +1007,7 @@ impl ScrawlCoordinator {
     }
 
     /// Polled while the gate holds a request: shows the permissions window once ⌥⇧ is up.
+    #[cfg(target_os = "macos")]
     pub fn tick_gate(&mut self) {
         use crate::onboarding::{Flow, Input, Mode, Permission};
         let Some(asks) = self.gate.tick(crate::platform::modifier_flags() != 0) else {
@@ -981,6 +1029,7 @@ impl ScrawlCoordinator {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn onboarding_event(&mut self, event: crate::onboarding::Event, cx: &mut Context<Self>) {
         use crate::onboarding::{Effect, Event, Progress};
         let effect = match event {
@@ -1061,13 +1110,16 @@ impl ScrawlCoordinator {
     /// The capture shortcut went down (from Carbon, the event tap or the HID poller).
     pub fn press_shortcut(&mut self, cx: &mut Context<Self>) {
         let activity = self.activity();
+        #[cfg(target_os = "macos")]
         if self.gate.is_pending() {
             return;
         }
         if !self.switcher.is_held() && activity == crate::hold::Activity::Free {
             // No switcher, picker or overlay before the permissions are on: they sit above
             // macOS's permission prompts and take the clicks meant for them.
+            #[cfg(target_os = "macos")]
             let missing = self.missing_to_record();
+            #[cfg(target_os = "macos")]
             if !self.gate.press(missing) {
                 scrawl_log("Shortcut held back: a required permission is off");
                 return;
@@ -1434,6 +1486,7 @@ impl ScrawlCoordinator {
         }
         scrawl_log("preview_iphone invoked");
         // The mirror would raise the camera prompt under the picker, which takes its clicks.
+        #[cfg(target_os = "macos")]
         if !self.ready_for(crate::onboarding::Permission::Camera) {
             self.cancel_recording(cx);
             return;
@@ -1524,7 +1577,10 @@ impl ScrawlCoordinator {
                     self.switcher.reset();
                     self.cancel_recording(cx);
                 }
+                #[cfg(target_os = "macos")]
                 self.open_settings(None);
+                #[cfg(target_os = "linux")]
+                self.open_settings();
             }
             _ => return false,
         }
@@ -1598,6 +1654,7 @@ impl ScrawlCoordinator {
         cx.notify();
     }
 
+    #[cfg(target_os = "macos")]
     pub fn request_immediate_frame(&self) {
         if let Some(ActiveRecording {
             source: CaptureSource::Screen { session, .. },
@@ -1611,7 +1668,9 @@ impl ScrawlCoordinator {
     /// Moves the island to `phase`, triggering a `.blurReplace` cross-transition on the inner content
     /// while the outer shell springs its width smoothly (`stiffness: 400, damping: 30` equivalent).
     fn set_island_phase(&mut self, phase: IslandPhase) {
+        #[cfg(target_os = "macos")]
         use crate::onboarding::Input;
+        #[cfg(target_os = "macos")]
         let capture = match (self.island_phase, phase) {
             (IslandPhase::Recording, IslandPhase::Recording) => None,
             (_, IslandPhase::Recording) => Some(Input::CaptureStarted),
@@ -1624,6 +1683,7 @@ impl ScrawlCoordinator {
             ) => Some(Input::CaptureEnded { completed: false }),
             _ => None,
         };
+        #[cfg(target_os = "macos")]
         if let Some(input) = capture
             && let Some(session) = self.onboarding.as_mut()
         {
@@ -1659,7 +1719,7 @@ impl ScrawlCoordinator {
             IslandPhase::Hidden | IslandPhase::Dismissing
         );
         self.island_phase = phase;
-        if crate::handoff::native_pill() {
+        if crate::platform::native_pill() {
             if !matches!(phase, IslandPhase::Hidden) {
                 self.ensure_native_pill();
             }
@@ -1797,8 +1857,9 @@ impl ScrawlCoordinator {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn ensure_native_pill(&mut self) {
-        if !crate::handoff::native_pill() || self.native_pill.is_some() {
+        if !crate::platform::native_pill() || self.native_pill.is_some() {
             return;
         }
         match crate::native::pill::NativePill::open() {
@@ -1819,6 +1880,11 @@ impl ScrawlCoordinator {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    /// The native capsule is macOS only.
+    pub(crate) fn ensure_native_pill(&mut self) {}
+
+    #[cfg(target_os = "macos")]
     fn pill_snapshot(&self) -> crate::native::pill::PillSnapshot {
         use crate::native::pill::{PillSnapshot, PillStyle, model::Pres};
         let recording_ms = self
@@ -1862,6 +1928,7 @@ impl ScrawlCoordinator {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn sync_native_pill(&mut self) {
         if self.native_pill.is_some() {
             let snap = self.pill_snapshot();
@@ -1871,6 +1938,10 @@ impl ScrawlCoordinator {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn sync_native_pill(&mut self) {}
+
+    #[cfg(target_os = "macos")]
     fn apply_pill_action(&mut self, action: crate::native::pill::PillAction, cx: &mut Context<Self>) {
         use crate::native::pill::PillAction;
         match action {
@@ -1884,6 +1955,11 @@ impl ScrawlCoordinator {
             PillAction::Inspect => self.inspect_completed_bundle(cx),
             PillAction::DismissCompleted => self.dismiss_completed_bundle(cx),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_pill_action(&mut self, action: crate::platform::PillAction, _cx: &mut Context<Self>) {
+        match action {}
     }
 
     pub fn dismiss_island(&mut self, cx: &mut Context<Self>) {
@@ -1929,6 +2005,7 @@ impl ScrawlCoordinator {
         cx.notify();
     }
 
+    #[cfg(target_os = "macos")]
     pub fn paste_completed_bundle(
         &mut self,
         click_target: Option<[f32; 2]>,
@@ -1954,13 +2031,34 @@ impl ScrawlCoordinator {
         });
     }
 
+    #[cfg(target_os = "linux")]
+    /// The Paste chip on Linux: the capture is already on the clipboard; it leaves the inbox.
+    pub fn paste_completed_bundle(
+        &mut self,
+        _click_target: Option<[f32; 2]>,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = self
+            .completed_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("latest"));
+        self.keep_pending_send(&dir);
+        self.dismiss_island(cx);
+        self.mark_handled(&dir);
+        std::thread::spawn(move || {
+            if let Err(err) = crate::handoff::copy_bundle_to_clipboard(&dir) {
+                scrawl_log(format!("copy_bundle_to_clipboard error: {err:#}"));
+            }
+        });
+    }
+
     /// Acts on smart routing's decision for a finished local capture (the clipboard already has
     /// it): a send waits out the undo window first; an offer is only named in the review window.
+    #[cfg(target_os = "macos")]
     fn act_on_route(
         &mut self,
         dir: PathBuf,
-        judgement: crate::routing::smart::Judgement,
-        url: Option<String>,
+        (judgement, url): Judged,
         cx: &mut Context<Self>,
     ) {
         use crate::routing::smart::Decision;
@@ -1981,8 +2079,14 @@ impl ScrawlCoordinator {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn act_on_route(&mut self, _dir: PathBuf, judged: Judged, _cx: &mut Context<Self>) {
+        match judged {}
+    }
+
     /// Shows "Sending to …" for `SMART_SEND_UNDO`, then records the destination and sends,
     /// unless ✕ or Paste cancelled it (nothing has left the Mac until then).
+    #[cfg(target_os = "macos")]
     fn send_after_undo(
         &mut self,
         dir: PathBuf,
@@ -2230,6 +2334,7 @@ impl ScrawlCoordinator {
     }
 
     /// The menu bar's picker, opening on the mode the last recording used.
+    #[cfg(target_os = "macos")]
     pub fn begin_target_selection(&mut self, cx: &mut Context<Self>) {
         if self.ready_to_record() {
             self.open_picker(None, false, cx);
@@ -2552,6 +2657,7 @@ impl ScrawlCoordinator {
             self.start_lab_recording(crate::phone::phone_target("iPhone", None, None, 0, 0), cx);
             return;
         }
+        #[cfg(target_os = "macos")]
         if !self.ready_for(crate::onboarding::Permission::Camera) {
             self.cancel_recording(cx);
             return;
@@ -2640,6 +2746,7 @@ impl ScrawlCoordinator {
     }
 
     /// The mirror ended without being asked: keep what was recorded, or drop an empty capture.
+    #[cfg(target_os = "macos")]
     fn phone_ended(&mut self, cx: &mut Context<Self>) {
         if self.iphone_preview.is_some() {
             self.iphone_preview = None;
@@ -2704,29 +2811,7 @@ impl ScrawlCoordinator {
 
         // A capture that ends on a dev site goes to its project's session; work that out (reading
         // the browser tab, the port's process, the sessions) while the bundle is built.
-        let smart = crate::handoff::experiment(crate::routing::SMART_ROUTING);
-        let screen = matches!(source, CaptureSource::Screen { .. });
-        // A window capture is of that window's app, whatever is in front at the end.
-        let front = screen
-            .then(|| {
-                (target.mode != CaptureMode::Window)
-                    .then(crate::platform::frontmost_app_info)
-                    .flatten()
-                    .and_then(|(_, _, id)| id)
-            })
-            .flatten();
-        let captured = target.bundle_id.clone();
-        let route = (screen && !smart).then(|| {
-            let (front, captured) = (front.clone(), captured.clone());
-            std::thread::spawn(move || {
-                crate::routing::route_capture(front.as_deref(), captured.as_deref())
-            })
-        });
-        let look = (screen && smart).then(|| {
-            std::thread::spawn(move || {
-                crate::routing::look_capture(front.as_deref(), captured.as_deref())
-            })
-        });
+        let routing = Routing::start(matches!(source, CaptureSource::Screen { .. }), &target);
 
         cx.spawn(async move |entity, cx| {
             let result = cx
@@ -2791,18 +2876,7 @@ impl ScrawlCoordinator {
                         None,
                         activity,
                     );
-                    if let Ok((dir, bundle, _)) = &mut finalized
-                        && let Some(Ok(Some(dest))) = route.map(std::thread::JoinHandle::join)
-                        && let Err(err) = crate::routing::record_destination(dir, bundle, dest)
-                    {
-                        scrawl_log(format!("routing: couldn't record the destination: {err:#}"));
-                    }
-                    let judged = match (&finalized, look.map(std::thread::JoinHandle::join)) {
-                        (Ok((dir, bundle, _)), Some(Ok(Some(live)))) => {
-                            Some(crate::routing::judge_capture(dir, bundle, live))
-                        }
-                        _ => None,
-                    };
+                    let judged = routing.finish(&mut finalized);
                     (finalized, duration_ms, judged)
                 })
                 .await;
@@ -2820,8 +2894,8 @@ impl ScrawlCoordinator {
                         coord.send_completed(dir.clone(), dest, cx);
                     }
                     coord.set_review_bundle((dir.clone(), bundle), coord.completed_note.clone());
-                    if let Some((judgement, url)) = judged {
-                        coord.act_on_route(dir, judgement, url, cx);
+                    if let Some(judged) = judged {
+                        coord.act_on_route(dir, judged, cx);
                     }
                 }
                 coord.set_island_phase(IslandPhase::Completed {
@@ -2834,6 +2908,88 @@ impl ScrawlCoordinator {
             });
         })
         .detach();
+    }
+}
+
+/// Smart routing's verdict on a finished capture, and the URL it was of.
+#[cfg(target_os = "macos")]
+type Judged = (crate::routing::smart::Judgement, Option<String>);
+/// Linux captures stay on the clipboard: there is no verdict.
+#[cfg(target_os = "linux")]
+type Judged = std::convert::Infallible;
+
+/// Where a finished screen capture goes (a dev site's session), worked out while its bundle is
+/// built.
+#[cfg(target_os = "macos")]
+struct Routing {
+    route: Option<std::thread::JoinHandle<Option<crate::model::Destination>>>,
+    look: Option<std::thread::JoinHandle<Option<crate::routing::look::Live>>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Routing {
+    /// `screen`: a screen capture (the only kind routed) of `target`.
+    fn start(screen: bool, target: &TargetInfo) -> Self {
+        let smart = crate::handoff::experiment(crate::routing::SMART_ROUTING);
+        // A window capture is of that window's app, whatever is in front at the end.
+        let front = screen
+            .then(|| {
+                (target.mode != CaptureMode::Window)
+                    .then(crate::platform::frontmost_app_info)
+                    .flatten()
+                    .and_then(|(_, _, id)| id)
+            })
+            .flatten();
+        let captured = target.bundle_id.clone();
+        let route = (screen && !smart).then(|| {
+            let (front, captured) = (front.clone(), captured.clone());
+            std::thread::spawn(move || {
+                crate::routing::route_capture(front.as_deref(), captured.as_deref())
+            })
+        });
+        let look = (screen && smart).then(|| {
+            std::thread::spawn(move || {
+                crate::routing::look_capture(front.as_deref(), captured.as_deref())
+            })
+        });
+        Self { route, look }
+    }
+
+    /// Records a plain route's destination in the bundle, or judges a smart one.
+    fn finish(
+        self,
+        finalized: &mut anyhow::Result<(PathBuf, ScrawlBundle, String)>,
+    ) -> Option<Judged> {
+        if let Ok((dir, bundle, _)) = finalized
+            && let Some(Ok(Some(dest))) = self.route.map(std::thread::JoinHandle::join)
+            && let Err(err) = crate::routing::record_destination(dir, bundle, dest)
+        {
+            scrawl_log(format!("routing: couldn't record the destination: {err:#}"));
+        }
+        match (&*finalized, self.look.map(std::thread::JoinHandle::join)) {
+            (Ok((dir, bundle, _)), Some(Ok(Some(live)))) => {
+                Some(crate::routing::judge_capture(dir, bundle, live))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// No automatic delivery on Linux: captures go to the clipboard only.
+#[cfg(target_os = "linux")]
+struct Routing;
+
+#[cfg(target_os = "linux")]
+impl Routing {
+    fn start(_screen: bool, _target: &TargetInfo) -> Self {
+        Self
+    }
+
+    fn finish(
+        self,
+        _finalized: &mut anyhow::Result<(PathBuf, ScrawlBundle, String)>,
+    ) -> Option<Judged> {
+        None
     }
 }
 
@@ -4902,6 +5058,7 @@ fn open_picker_windows(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) {
             is_resizable: false,
             is_minimizable: false,
             window_background: WindowBackgroundAppearance::Transparent,
+            app_id: Some(PICKER_APP_ID.into()),
             ..Default::default()
         },
         move |window, cx| {
@@ -4931,7 +5088,7 @@ fn open_picker_windows(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) {
 }
 
 fn ensure_hud_pill_open(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) {
-    if crate::handoff::native_pill() {
+    if crate::platform::native_pill() {
         let _ = coord_entity.update(cx, |coord, _| {
             coord.ensure_native_pill();
             coord.sync_native_pill();
@@ -4976,7 +5133,7 @@ fn ensure_hud_pill_open(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) 
     let pill_bounds = Bounds {
         origin: point(
             (display_bounds.size.width - pill_size.width) * 0.5,
-            px(34.0),
+            px(PILL_WINDOW_TOP),
         ),
         size: pill_size,
     };
@@ -4993,6 +5150,7 @@ fn ensure_hud_pill_open(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) 
             is_resizable: false,
             is_minimizable: false,
             window_background: WindowBackgroundAppearance::Transparent,
+            app_id: Some(PILL_APP_ID.into()),
             ..Default::default()
         },
         move |window, cx| {
@@ -5058,7 +5216,7 @@ fn open_review_window(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) {
             return;
         }
     }
-    let bounds = Bounds::centered(None, size(px(1120.0), px(740.0)), cx);
+    let bounds = Bounds::centered(None, size(px(REVIEW_WINDOW_W), px(REVIEW_WINDOW_H)), cx);
     let coord_clone = coord_entity.clone();
     let _ = cx.open_window(
         WindowOptions {
@@ -5073,6 +5231,7 @@ fn open_review_window(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App) {
             kind: WindowKind::Normal,
             is_resizable: true,
             window_background: WindowBackgroundAppearance::Opaque,
+            app_id: Some(REVIEW_APP_ID.into()),
             ..Default::default()
         },
         move |window, cx| {
@@ -5097,7 +5256,64 @@ pub(crate) fn start_metric(name: &str, started: Instant) {
     }
 }
 
+impl ScrawlCoordinator {
+    /// An event from the input monitor, the phone, the helper windows or the ingest server.
+    /// Returns whether the capsule's window should open (a capture arrived from the iPhone).
+    fn handle_event(&mut self, ev: LiveOverlayEvent, cx: &mut Context<Self>) -> bool {
+        match ev {
+            LiveOverlayEvent::CaptureShortcut => self.press_shortcut(cx),
+            #[cfg(target_os = "macos")]
+            LiveOverlayEvent::PasteLatestShortcut => {
+                if !self.is_recording() && !self.is_selecting() {
+                    self.paste_latest(cx);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            LiveOverlayEvent::UndoStroke => {
+                self.undo_stroke(cx);
+            }
+            #[cfg(target_os = "macos")]
+            LiveOverlayEvent::CancelCapture => {
+                self.cancel_recording(cx);
+            }
+            #[cfg(target_os = "macos")]
+            LiveOverlayEvent::RequestSnapshot => {
+                self.request_immediate_frame();
+                cx.notify();
+            }
+            #[cfg(target_os = "macos")]
+            LiveOverlayEvent::PhoneEnded => self.phone_ended(cx),
+            #[cfg(target_os = "macos")]
+            LiveOverlayEvent::Onboarding(event) => self.onboarding_event(event, cx),
+            #[cfg(target_os = "macos")]
+            LiveOverlayEvent::Settings(event) => self.settings_event(event, cx),
+            #[cfg(target_os = "macos")]
+            LiveOverlayEvent::IngestedBundle {
+                dir,
+                bundle,
+                status,
+            } => {
+                let frame_count = bundle.keyframes.len();
+                let duration_ms = bundle.duration_ms;
+                let inbox_count = self.add_to_inbox(&dir, &bundle);
+                self.completed_dir = Some(dir.clone());
+                self.set_review_bundle((dir, *bundle), status);
+                self.set_island_phase(IslandPhase::Completed {
+                    finished_at: Instant::now(),
+                    frame_count,
+                    duration_ms,
+                    inbox_count,
+                });
+                cx.notify();
+                return true;
+            }
+        }
+        false
+    }
+}
+
 /// Real startup paths, without registering hotkeys or publishing personal captures.
+#[cfg(target_os = "macos")]
 pub fn run_start_benchmark() {
     let app = Application::new().with_assets(crate::icons::Assets);
     app.run(|cx: &mut App| {
@@ -5153,6 +5369,7 @@ pub fn run_start_benchmark() {
 
 /// Runs the GPUI desktop app, optionally opening an initial `.scrawl` bundle in the Review window
 /// or starting recording immediately.
+#[cfg(target_os = "macos")]
 pub fn run_app(
     initial_bundle: Option<(PathBuf, ScrawlBundle)>,
     start_recording_immediately: bool,
@@ -5293,48 +5510,7 @@ pub fn run_app(
 
                     let mut should_open_pill = false;
                     while let Ok(ev) = ui_receiver.try_recv() {
-                        loop_coord.update(cx, |coord, cx| match ev {
-                            LiveOverlayEvent::CaptureShortcut => coord.press_shortcut(cx),
-                            LiveOverlayEvent::PasteLatestShortcut => {
-                                if !coord.is_recording() && !coord.is_selecting() {
-                                    coord.paste_latest(cx);
-                                }
-                            }
-                            LiveOverlayEvent::UndoStroke => {
-                                coord.undo_stroke(cx);
-                            }
-                            LiveOverlayEvent::CancelCapture => {
-                                coord.cancel_recording(cx);
-                            }
-                            LiveOverlayEvent::RequestSnapshot => {
-                                coord.request_immediate_frame();
-                                cx.notify();
-                            }
-                            LiveOverlayEvent::PhoneEnded => coord.phone_ended(cx),
-                            LiveOverlayEvent::Onboarding(event) => {
-                                coord.onboarding_event(event, cx)
-                            }
-                            LiveOverlayEvent::Settings(event) => coord.settings_event(event, cx),
-                            LiveOverlayEvent::IngestedBundle {
-                                dir,
-                                bundle,
-                                status,
-                            } => {
-                                let frame_count = bundle.keyframes.len();
-                                let duration_ms = bundle.duration_ms;
-                                let inbox_count = coord.add_to_inbox(&dir, &bundle);
-                                coord.completed_dir = Some(dir.clone());
-                                coord.set_review_bundle((dir, *bundle), status);
-                                coord.set_island_phase(IslandPhase::Completed {
-                                    finished_at: Instant::now(),
-                                    frame_count,
-                                    duration_ms,
-                                    inbox_count,
-                                });
-                                should_open_pill = true;
-                                cx.notify();
-                            }
-                        });
+                        should_open_pill |= loop_coord.update(cx, |coord, cx| coord.handle_event(ev, cx));
                     }
                     if should_open_pill {
                         ensure_hud_pill_open(&loop_coord, cx);
@@ -5368,9 +5544,103 @@ pub fn run_app(
     });
 }
 
+/// Runs the GPUI app on Linux: the capsule and the review window, driven by the capture
+/// shortcut, with Hyprland rules placing the windows. The tray and the control socket that
+/// routes `scrawl toggle` here come with task 4.
+#[cfg(target_os = "linux")]
+pub fn run_app(
+    initial_bundle: Option<(PathBuf, ScrawlBundle)>,
+    start_recording_immediately: bool,
+    start_iphone_immediately: bool,
+    screenshot_out: Option<PathBuf>,
+) {
+    let app = Application::new().with_assets(crate::icons::Assets);
+    app.run(move |cx: &mut App| {
+        scrawl_log(format!("run_app started pid={}", std::process::id()));
+        crate::linux::hypr::install_window_rules(
+            [PILL_WINDOW_W, PILL_WINDOW_H, PILL_WINDOW_TOP],
+            [REVIEW_WINDOW_W, REVIEW_WINDOW_H],
+        );
+        cx.on_window_closed(|cx| cx.defer(hand_back_keys)).detach();
+        let (ui_sender, ui_receiver) = flume::unbounded();
+        let telemetry = SharedCaptureTelemetry::new(ui_sender);
+        install_global_hotkeys(&telemetry);
+        start_global_input_tap(Arc::clone(&telemetry));
+        let has_initial = initial_bundle.is_some();
+        let coordinator = cx.new(|_| ScrawlCoordinator::new(telemetry, initial_bundle));
+        set_status_inbox_count(coordinator.read(cx).inbox.len());
+
+        if has_initial {
+            open_review_window(&coordinator, cx);
+        }
+        if start_recording_immediately {
+            coordinator.update(cx, |coord, cx| coord.record_or_finish(cx));
+        }
+        if start_iphone_immediately {
+            coordinator.update(cx, |coord, cx| coord.start_recording_iphone(cx));
+        }
+        if let Some(out_path) = screenshot_out {
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(650))
+                    .await;
+                let shot = cx
+                    .background_executor()
+                    .spawn(async move { capture_own_window_screenshot(&out_path) })
+                    .await;
+                if let Err(error) = shot {
+                    scrawl_log(format!("Screenshot failed: {error:#}"));
+                }
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        }
+
+        let loop_coord = coordinator.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(8))
+                    .await;
+                let _ = cx.update(|cx| {
+                    let mut should_open_pill = false;
+                    while let Ok(ev) = ui_receiver.try_recv() {
+                        should_open_pill |= loop_coord.update(cx, |coord, cx| coord.handle_event(ev, cx));
+                    }
+                    if should_open_pill {
+                        ensure_hud_pill_open(&loop_coord, cx);
+                    }
+                    motion::poll_tune();
+                    if loop_coord.read(cx).switcher.is_held() {
+                        loop_coord.update(cx, |coord, cx| coord.tick_switcher(cx));
+                    } else if loop_coord.read(cx).telemetry.take_escape()
+                        && loop_coord.read(cx).is_selecting()
+                    {
+                        loop_coord.update(cx, |coord, cx| coord.cancel_recording(cx));
+                    }
+                    if loop_coord.read(cx).is_island_visible() {
+                        record_external_frontmost_app();
+                        loop_coord.update(cx, |coord, cx| coord.island_tick(cx));
+                    }
+                });
+            }
+        })
+        .detach();
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn app_ids_are_the_classes_the_hyprland_rules_match() {
+        use crate::linux::hypr;
+        assert_eq!(PILL_APP_ID, hypr::PILL_CLASS);
+        assert_eq!(PICKER_APP_ID, hypr::PICKER_CLASS);
+        assert_eq!(REVIEW_APP_ID, hypr::REVIEW_CLASS);
+    }
 
     #[test]
     fn island_geometry_is_concentric() {
@@ -5620,6 +5890,7 @@ mod tests {
     #[test]
     fn clock_template_is_width_stable() {
         assert_eq!(clock_template("12:34"), "00:00");
+        #[cfg(target_os = "macos")]
         assert_eq!(completed_meta(8_000, 1), "· 1 frame · ⌥⇧V");
         assert_eq!(completed_label(0, None), "Copied");
         assert_eq!(completed_label(0, Some("Sent to SCRAWL")), "Sent to SCRAWL");

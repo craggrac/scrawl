@@ -11,6 +11,7 @@
 //! Capture pixels are a target's normalized coordinates (`SharedCaptureTelemetry::normalize_point`)
 //! times its recording's size (`capture::capture_size`, at most the display's own scale).
 //!
+#[cfg(any(target_os = "macos", test))]
 use crate::model::TargetFrame;
 
 /// `[x, y, width, height]`.
@@ -31,6 +32,7 @@ pub struct Screen {
 
 /// AppKit rect → global rect (and back: the flip is its own inverse). `primary_h` is the
 /// primary display's height.
+#[cfg(any(target_os = "macos", test))]
 pub fn flip(r: Rect, primary_h: f64) -> Rect {
     [r[0], primary_h - r[1] - r[3], r[2], r[3]]
 }
@@ -79,6 +81,7 @@ pub fn index_for_rect(screens: &[Screen], r: Rect) -> Option<usize> {
 }
 
 /// Global point → points from `screen`'s top-left corner.
+#[cfg(any(target_os = "macos", test))]
 pub fn to_local(screen: Rect, p: [f64; 2]) -> [f64; 2] {
     [p[0] - screen[0], p[1] - screen[1]]
 }
@@ -98,6 +101,7 @@ pub fn clamp_to(r: Rect, screen: Rect) -> Rect {
 
 /// `SCStreamConfiguration.sourceRect` for an area: points from its display's top-left corner,
 /// not global ones.
+#[cfg(any(target_os = "macos", test))]
 pub fn source_rect(area: Rect, display: Rect) -> Rect {
     let [x, y, w, h] = clamp_to(area, display);
     let [lx, ly] = to_local(display, [x, y]);
@@ -125,6 +129,7 @@ pub fn area_on_display(screens: &[Screen], area: Rect) -> Option<(usize, Rect)> 
 }
 
 /// `frame` with its display's scale.
+#[cfg(any(target_os = "macos", test))]
 pub fn with_scale(frame: Rect, scale: f64) -> TargetFrame {
     TargetFrame {
         x: frame[0],
@@ -141,6 +146,7 @@ pub fn with_scale(frame: Rect, scale: f64) -> TargetFrame {
 
 /// Where the capsule's panel (`width` points wide) goes on `screen`: centred, its top
 /// `PANEL_Y` below the screen's top, and lower when a taller menu bar or the notch needs it.
+#[cfg(any(target_os = "macos", test))]
 pub fn pill_origin(screen: &Screen, width: f64, panel_y: f64) -> [f64; 2] {
     let menu_bar = screen.visible[1] - screen.frame[1];
     let top = panel_y.max(menu_bar - 3.0).max(screen.safe_top + 2.0);

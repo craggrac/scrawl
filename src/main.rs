@@ -12,11 +12,8 @@ mod export;
 mod handoff;
 mod helper;
 mod hex;
-#[cfg(target_os = "macos")]
 mod hold;
-#[cfg(target_os = "macos")]
 mod icons;
-#[cfg(any(target_os = "macos", test))]
 mod inbox;
 mod keyframes;
 #[cfg(target_os = "macos")]
@@ -32,13 +29,11 @@ mod native;
 mod onboarding;
 mod page;
 mod phone;
-#[cfg(target_os = "macos")]
 mod platform;
 mod render;
 mod retention;
 mod routing;
 mod screens;
-#[cfg(target_os = "macos")]
 mod selection;
 #[cfg(target_os = "macos")]
 mod settings;
@@ -46,7 +41,6 @@ mod sketch;
 #[cfg(target_os = "macos")]
 mod sparkle;
 mod transcribe;
-#[cfg(target_os = "macos")]
 mod ui;
 mod web;
 mod windows;
@@ -165,7 +159,6 @@ enum HexCommand {
     Status,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Subcommand)]
 enum LabCommand {
     /// Play a capsule scene: tap-then-area, tap-then-window, tap-then-screen, hold-switcher, finish.
@@ -187,7 +180,6 @@ enum LabCommand {
     },
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Subcommand)]
 enum TuneCommand {
     /// Every key with its live and default value, and the presets (default).
@@ -205,7 +197,6 @@ enum TuneCommand {
 #[derive(Subcommand)]
 enum Command {
     /// Launch the GPUI menu-bar and review application (the default when macOS opens Scrawl.app).
-    #[cfg(target_os = "macos")]
     App {
         /// Start a capture session immediately on launch.
         #[arg(long)]
@@ -306,7 +297,6 @@ enum Command {
     },
     /// Motion lab: replay the capsule's states on a fixed timeline with nothing captured, for
     /// traces (`--trace`, motion-lint's format), screen recordings and tuning.
-    #[cfg(target_os = "macos")]
     #[command(hide = true)]
     Lab {
         #[command(subcommand)]
@@ -314,7 +304,6 @@ enum Command {
     },
     /// Tune the capsule's springs live: edits `~/.config/scrawl/tune.json`, which debug builds
     /// (the lab and the installed app) re-read within a quarter second.
-    #[cfg(target_os = "macos")]
     #[command(hide = true)]
     Tune {
         #[command(subcommand)]
@@ -534,7 +523,6 @@ enum Command {
         explain: Option<PathBuf>,
     },
     /// Open a `.scrawl` bundle in the native GPUI review window.
-    #[cfg(target_os = "macos")]
     Preview {
         /// Path to `.scrawl` bundle directory or `latest`. Generates a demo bundle if none exists.
         #[arg(default_value = "latest")]
@@ -1468,7 +1456,6 @@ fn main() -> Result<()> {
         }
     };
     match command {
-        #[cfg(target_os = "macos")]
         Command::App { record, iphone } => {
             ui::run_app(None, record, iphone, None);
             Ok(())
@@ -1869,7 +1856,6 @@ fn main() -> Result<()> {
             print!("{summary}");
             Ok(())
         }
-        #[cfg(target_os = "macos")]
         Command::Lab {
             command:
                 LabCommand::Pill {
@@ -1896,7 +1882,6 @@ fn main() -> Result<()> {
             });
             Ok(())
         }
-        #[cfg(target_os = "macos")]
         Command::Tune { command } => ui::tune_command(match command.unwrap_or(TuneCommand::List) {
             TuneCommand::List => ui::TuneAction::List,
             TuneCommand::Set { key, value } => ui::TuneAction::Set(key, value),
@@ -2283,7 +2268,6 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        #[cfg(target_os = "macos")]
         Command::Preview {
             bundle,
             capture_screenshot,

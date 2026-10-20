@@ -666,15 +666,6 @@ pub fn update_global_shortcut(telemetry: &SharedCaptureTelemetry, config: Shortc
     }
 }
 
-/// A shortcut label split into its modifiers and key: `⌥⇧S` → (`⌥⇧`, `S`).
-pub fn shortcut_parts(label: &str) -> (&str, &str) {
-    let split = label
-        .char_indices()
-        .find(|(_, c)| !matches!(c, '⌃' | '⌥' | '⇧' | '⌘'))
-        .map_or(label.len(), |(i, _)| i);
-    label.split_at(split)
-}
-
 /// Whether a key press is the record shortcut. A custom one matches exactly; the default ⌥⇧S
 /// also answers with ⌃ or ⌘ added and as ⌃⌥⌘S, on the active layout's S key (`s_code`) or the
 /// ANSI one.
@@ -1108,13 +1099,6 @@ pub fn list_selectable_windows() -> Vec<TargetInfo> {
             }
         })
         .collect()
-}
-
-pub fn selectable_window_at(windows: &[TargetInfo], x: f64, y: f64) -> Option<&TargetInfo> {
-    windows.iter().find(|window| {
-        let f = window.frame;
-        x >= f.x && x <= f.x + f.width && y >= f.y && y <= f.y + f.height
-    })
 }
 
 #[cfg(test)]

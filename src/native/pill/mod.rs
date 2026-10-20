@@ -53,31 +53,9 @@ unsafe extern "C" {
     );
 }
 
-/// Capsule visual style (`pillStyle: "black" | "glass"`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PillStyle {
-    #[default]
-    Black,
-    Glass,
-}
+pub use crate::ui::motion::PillStyle;
 
-#[allow(dead_code)]
 impl PillStyle {
-    pub fn from_str_opt(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "glass" | "liquid" | "liquid-glass" | "1" | "true" => Some(Self::Glass),
-            "black" | "dark" | "metal" | "0" | "false" => Some(Self::Black),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Black => "black",
-            Self::Glass => "glass",
-        }
-    }
-
     /// Resolves the active `PillStyle` from `SCRAWL_PILL_STYLE`, `tune.json`, or `config.json`.
     pub fn current() -> Self {
         if let Ok(env) = std::env::var("SCRAWL_PILL_STYLE")

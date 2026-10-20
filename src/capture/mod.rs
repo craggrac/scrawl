@@ -101,11 +101,16 @@ impl CandidateBuffer {
 pub enum LiveOverlayEvent {
     /// ⌥⇧S (or the configured shortcut) went down; `hold::Switcher` decides what it means.
     CaptureShortcut,
+    #[cfg(target_os = "macos")]
     PasteLatestShortcut,
+    #[cfg(target_os = "macos")]
     UndoStroke,
+    #[cfg(target_os = "macos")]
     CancelCapture,
+    #[cfg(target_os = "macos")]
     RequestSnapshot,
     /// The iPhone mirror ended on its own (unplugged, never found, or access denied).
+    #[cfg(target_os = "macos")]
     PhoneEnded,
     /// The welcome window: a button, fresh permission states, or the helper exiting.
     #[cfg(target_os = "macos")]
@@ -114,11 +119,29 @@ pub enum LiveOverlayEvent {
     #[cfg(target_os = "macos")]
     Settings(crate::settings::Event),
     /// A ScrawlKit recording was ingested from an iPhone and compiled into a `.scrawl` bundle.
+    #[cfg(target_os = "macos")]
     IngestedBundle {
         dir: PathBuf,
         bundle: Box<crate::model::ScrawlBundle>,
         status: Option<String>,
     },
+}
+
+/// A shortcut label split into its modifiers and key: `⌥⇧S` → (`⌥⇧`, `S`).
+pub fn shortcut_parts(label: &str) -> (&str, &str) {
+    let split = label
+        .char_indices()
+        .find(|(_, c)| !matches!(c, '⌃' | '⌥' | '⇧' | '⌘'))
+        .map_or(label.len(), |(i, _)| i);
+    label.split_at(split)
+}
+
+/// The front-most of `windows` (front to back) holding the global point `x`, `y`.
+pub fn selectable_window_at(windows: &[TargetInfo], x: f64, y: f64) -> Option<&TargetInfo> {
+    windows.iter().find(|window| {
+        let f = window.frame;
+        x >= f.x && x <= f.x + f.width && y >= f.y && y <= f.y + f.height
+    })
 }
 
 /// What a finished screen capture leaves behind.
