@@ -35,7 +35,12 @@ bind = ALT SHIFT, S, exec, scrawl toggle
 
 Press it to start and again to stop. The bundle lands in `~/.local/share/scrawl/captures/` and its
 summary on the clipboard; `scrawl send latest --session ses_…` delivers it to OpenCode. Not yet on
-Linux: ink, the pill and menu-bar app, iPhone capture, video export.
+Linux: ink, the menu-bar app, iPhone capture, video export.
+
+`scrawl app` runs the capsule on Linux too. `wf-recorder` records the whole output, so the capsule
+leaves the screen about 1.5 s into a recording (it never lands in the capture) and comes back for
+processing and the result: finish a recording with the shortcut. Untested so far: where the picker
+and capsule land with more than one monitor.
 
 While recording, Scrawl notes clicks, drags, scrolling and Ctrl/Super shortcuts (for example
 `Ctrl+L`) from the input devices, and the keyframes around them say "clicked ..." or "scrolled
