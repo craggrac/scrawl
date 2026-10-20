@@ -63,7 +63,11 @@ and `quit` are its commands, one per line.
   shortcut itself. Tap it to record the screen, or keep Alt+Shift held after the S to open the
   mode switcher (each further S steps to the next mode, letting go records it), and Esc closes
   the switcher or the picker. A press seen
-  both there and through the bind counts once. The listener reads keyboards only, compares each
+  both there and through the bind counts once, and a press that only came through the bind
+  (`scrawl toggle`) is always a tap. The shortcut recorded in the review window is saved in
+  `~/.config/scrawl/config.json` (`linuxShortcuts`) and is what the listener and the capsule
+  use, but Scrawl doesn't edit Hyprland's binds: change the bind to the same keys (for
+  `SUPER + R`, `hl.bind("SUPER + R", hl.dsp.exec_cmd("scrawl toggle"))`). The listener reads keyboards only, compares each
   key with the shortcut and Esc and keeps nothing else, and ignores both while the screen is
   locked (Hyprland's `locked` state, so nothing typed into hyprlock reaches Scrawl).
 - **Capsule.** `wf-recorder` records the whole output, so the capsule leaves the screen about

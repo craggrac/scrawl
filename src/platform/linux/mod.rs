@@ -95,6 +95,11 @@ pub fn install_global_hotkeys(_telemetry: &std::sync::Arc<SharedCaptureTelemetry
 /// recorded separately, per capture (`linux::input::InputRecorder`).
 pub fn start_global_input_tap(telemetry: std::sync::Arc<SharedCaptureTelemetry>) {
     use crate::linux::hotkey::{self, KeyAction};
+    // The shortcut saved from the review window, which the bind should match.
+    *telemetry
+        .shortcut
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = shortcut::load_saved();
     let matcher = std::sync::Arc::clone(&telemetry);
     hotkey::start(
         move |code, cmd, ctrl, alt, shift| matcher.matches_shortcut(code, cmd, ctrl, alt, shift),
@@ -113,13 +118,17 @@ pub fn start_global_input_tap(telemetry: std::sync::Arc<SharedCaptureTelemetry>)
     );
 }
 
-/// The record shortcut recorded in the review window. It only renames the shortcut here: the
-/// key itself is the Hyprland bind, which Scrawl doesn't edit.
+/// The record shortcut recorded in the review window. It is saved in the config file and is
+/// what the listener matches (and the capsule names); the key that starts a recording from
+/// anywhere is the Hyprland bind, which Scrawl doesn't edit, so that has to match.
 pub fn update_global_shortcut(telemetry: &SharedCaptureTelemetry, config: ShortcutConfig) {
     scrawl_log(format!(
         "Record shortcut is now {}; change the Hyprland bind to match",
         config.label
     ));
+    if let Err(error) = shortcut::save_in(&crate::handoff::default_config_path(), &config) {
+        scrawl_log(format!("Saving the record shortcut failed: {error:#}"));
+    }
     *telemetry
         .shortcut
         .lock()

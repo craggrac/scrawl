@@ -63,6 +63,49 @@ pub fn shortcut_from_key_and_mods(
     })
 }
 
+/// The config key of the saved shortcut. It is not macOS's `shortcuts` (Carbon key codes).
+const CONFIG_KEY: &str = "linuxShortcuts";
+
+/// The record shortcut saved in the config file at `path`, if it has a usable one.
+pub fn load_saved_in(path: &std::path::Path) -> Option<ShortcutConfig> {
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let saved = config.get(CONFIG_KEY)?.get("record")?;
+    let label = saved.get("label")?.as_str()?;
+    let key_code = u32::try_from(saved.get("keyCode")?.as_u64()?).ok()?;
+    let key = crate::capture::shortcut_parts(label).1;
+    // The key must be the one the label names, or the listener would match something else.
+    let named = match key {
+        "Space" => 0x20,
+        _ => match key.strip_prefix('F').and_then(|n| n.parse::<u32>().ok()) {
+            Some(n) if (1..=12).contains(&n) => 0xF000 + n,
+            _ => match key.as_bytes() {
+                [c] if c.is_ascii_uppercase() || c.is_ascii_digit() => u32::from(*c),
+                _ => return None,
+            },
+        },
+    };
+    (named == key_code).then(|| ShortcutConfig {
+        key_code,
+        label: label.to_owned(),
+    })
+}
+
+/// Saves the record shortcut to the config file at `path`; the default is removed, not written.
+pub fn save_in(path: &std::path::Path, config: &ShortcutConfig) -> anyhow::Result<()> {
+    let value = if *config == ShortcutConfig::default_record() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({ "record": { "keyCode": config.key_code, "label": config.label } })
+    };
+    crate::handoff::set_config_value_in(path, CONFIG_KEY, value)
+}
+
+/// The record shortcut saved in Scrawl's config file, else the default.
+pub fn load_saved() -> ShortcutConfig {
+    load_saved_in(&crate::handoff::default_config_path())
+        .unwrap_or_else(ShortcutConfig::default_record)
+}
+
 /// Where a press of the capture shortcut was seen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PressSource {
@@ -206,6 +249,36 @@ mod tests {
         assert_eq!(hold_modifiers(Keys, MOD_ALT, "⌥⇧S"), 0);
         assert_eq!(hold_modifiers(Keys, 0, "⌘R"), 0);
         assert_eq!(hold_modifiers(Keys, MOD_SUPER, "F5"), 0);
+    }
+
+    #[test]
+    fn the_record_shortcut_is_saved_in_the_config_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("scrawl-shortcut-{}", std::process::id()));
+        let path = dir.join("config.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(load_saved_in(&path), None);
+        // Other settings in the file stay.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, r#"{"auto_copy": true}"#).unwrap();
+        let super_r = shortcut_from_key_and_mods("r", true, false, false, false).unwrap();
+        assert_eq!(super_r.label, "⌘R");
+        save_in(&path, &super_r).unwrap();
+        assert_eq!(load_saved_in(&path), Some(super_r));
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(config["auto_copy"], true);
+        assert_eq!(config["linuxShortcuts"]["record"]["label"], "⌘R");
+        // The default is removed, so the file doesn't pin it.
+        save_in(&path, &ShortcutConfig::default_record()).unwrap();
+        assert_eq!(load_saved_in(&path), None);
+        // A label that doesn't name the key is no shortcut.
+        std::fs::write(
+            &path,
+            r#"{"linuxShortcuts": {"record": {"keyCode": 82, "label": ""}}}"#,
+        )
+        .unwrap();
+        assert_eq!(load_saved_in(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
