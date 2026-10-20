@@ -91,6 +91,11 @@ fn hypr_json<T: DeserializeOwned>(command: &str) -> Result<T> {
     serde_json::from_slice(&reply).with_context(|| format!("Invalid Hyprland reply to {command}"))
 }
 
+/// The cursor in global logical points.
+pub fn cursor_position() -> Option<(f64, f64)> {
+    hypr_json::<CursorPos>("cursorpos").ok().map(|c| (c.x, c.y))
+}
+
 /// A monitor's area in logical points (rotated monitors swap sides).
 pub fn monitor_frame(monitor: &Monitor) -> TargetFrame {
     let (width, height) = if monitor.transform % 2 == 1 {
