@@ -63,13 +63,18 @@ and `quit` are its commands, one per line.
   shortcut itself. Tap it to record the screen, or keep Alt+Shift held after the S to open the
   mode switcher (each further S steps to the next mode, letting go records it), and Esc closes
   the switcher or the picker. A press seen
-  both there and through the bind counts once. The listener only compares each key with the
-  shortcut and Esc; it keeps nothing else.
+  both there and through the bind counts once. The listener reads keyboards only, compares each
+  key with the shortcut and Esc and keeps nothing else, and ignores both while the screen is
+  locked (Hyprland's `locked` state, so nothing typed into hyprlock reaches Scrawl).
 - **Capsule.** `wf-recorder` records the whole output, so the capsule leaves the screen about
   1.5 s into a recording (it never lands in the capture) and comes back for processing and the
   result. Finish a recording with the shortcut, `scrawl toggle` or the tray.
 - **Tray.** Record or Stop, Open Latest Capture and Quit Scrawl. It needs a StatusNotifierItem
   host on the bar (waybar's `tray` module, Noctalia's bar); without one the app runs without it.
+- **Quitting.** Quit Scrawl, `quit` on the socket, SIGTERM, SIGINT and SIGHUP all quit the same
+  way: a running recording is thrown away and its `wf-recorder` stopped, then the socket goes.
+  SIGKILL can't be caught: it leaves `wf-recorder` running (stop it with `pkill wf-recorder`) and
+  a stale socket, which the next `scrawl app` replaces.
 - **Housekeeping.** gpui ends an app whose last window closes, so the app keeps an empty 1×1
   window on the hidden special workspace `special:scrawl`.
 

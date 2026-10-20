@@ -5589,7 +5589,7 @@ fn start_linux_app(
     telemetry: &Arc<SharedCaptureTelemetry>,
 ) -> (
     flume::Receiver<MenuAction>,
-    Option<crate::platform::tray::Tray>,
+    crate::platform::tray::Tray,
 ) {
     use crate::linux::control::Command;
     use crate::platform::tray::{Tray, TrayItem};
@@ -5660,7 +5660,11 @@ fn open_keep_alive_window(cx: &mut App) {
             app_id: Some(crate::linux::hypr::KEEP_ALIVE_CLASS.into()),
             ..Default::default()
         },
-        |_, cx| cx.new(|_| KeepAliveWindow),
+        |window, cx| {
+            // Closed from outside (a compositor close), it would end the app outside Quit.
+            window.on_window_should_close(cx, |_, _| false);
+            cx.new(|_| KeepAliveWindow)
+        },
     );
     if let Err(error) = opened {
         scrawl_log(format!("Keep-alive window: {error:#}; Scrawl quits with its last window"));
@@ -5727,8 +5731,9 @@ fn step_linux_pill_window(coord_entity: &Entity<ScrawlCoordinator>, cx: &mut App
 }
 
 /// Runs the GPUI app on Linux: the capsule and the review window, driven by the capture
-/// shortcut, with Hyprland rules placing the windows. The tray and the control socket that
-/// routes `scrawl toggle` here come with task 4.
+/// shortcut, with Hyprland rules placing the windows. As `scrawl app` (no bundle to preview,
+/// no screenshot) it is the one app per user, with the control socket `scrawl toggle` uses, the
+/// tray, the shortcut listener, and Quit on SIGTERM, SIGINT or SIGHUP.
 #[cfg(target_os = "linux")]
 pub fn run_app(
     initial_bundle: Option<(PathBuf, ScrawlBundle)>,
@@ -5739,7 +5744,10 @@ pub fn run_app(
     // `scrawl app` itself, not a preview or a screenshot: one per user.
     let control = if initial_bundle.is_none() && screenshot_out.is_none() {
         match crate::linux::control::bind() {
-            Ok((listener, path)) => Some((listener, path)),
+            Ok(control) => {
+                crate::linux::control::install_quit_signals();
+                Some(control)
+            }
             Err(error) => {
                 eprintln!("{error:#}");
                 std::process::exit(1);
@@ -5759,11 +5767,11 @@ pub fn run_app(
         let (ui_sender, ui_receiver) = flume::unbounded();
         let telemetry = SharedCaptureTelemetry::new(ui_sender);
         install_global_hotkeys(&telemetry);
-        let (socket_path, menu_rx, mut tray) = match control {
-            Some((listener, path)) => {
+        let (instance, menu_rx, mut tray) = match control {
+            Some((listener, instance)) => {
                 open_keep_alive_window(cx);
                 let (menu_rx, tray) = start_linux_app(listener, &telemetry);
-                (Some(path), Some(menu_rx), tray)
+                (Some(instance), Some(menu_rx), Some(tray))
             }
             None => (None, None, None),
         };
@@ -5805,19 +5813,26 @@ pub fn run_app(
                     .timer(Duration::from_millis(8))
                     .await;
                 let _ = cx.update(|cx| {
+                    let mut quit = crate::linux::control::quit_signalled();
                     if let Some(rx) = &menu_rx {
                         while let Ok(action) = rx.try_recv() {
-                            if act_on_menu(action, &loop_coord, cx) && quitting.is_none() {
-                                // A recording is thrown away and its recorder stopped first,
-                                // or `wf-recorder` would outlive the app.
-                                loop_coord.update(cx, |coord, cx| {
-                                    if coord.is_recording() {
-                                        coord.cancel_recording(cx);
-                                    }
-                                });
-                                quitting = Some(Instant::now());
+                            // Once quitting, nothing may start a recording.
+                            if quitting.is_none() {
+                                quit |= act_on_menu(action, &loop_coord, cx);
                             }
                         }
+                    }
+                    if quit && quitting.is_none() {
+                        // A recording is thrown away and its recorder stopped first, or
+                        // `wf-recorder` would outlive the app.
+                        scrawl_log("Quitting");
+                        loop_coord.update(cx, |coord, cx| {
+                            coord.switcher.reset();
+                            if coord.is_recording() || coord.is_selecting() {
+                                coord.cancel_recording(cx);
+                            }
+                        });
+                        quitting = Some(Instant::now());
                     }
                     if let Some(tray) = tray.as_mut() {
                         let coord = loop_coord.read(cx);
@@ -5833,14 +5848,19 @@ pub fn run_app(
                     }
                     let mut should_open_pill = false;
                     while let Ok(ev) = ui_receiver.try_recv() {
-                        should_open_pill |= loop_coord.update(cx, |coord, cx| coord.handle_event(ev, cx));
+                        if quitting.is_none() {
+                            should_open_pill |=
+                                loop_coord.update(cx, |coord, cx| coord.handle_event(ev, cx));
+                        }
                     }
                     if should_open_pill {
                         ensure_hud_pill_open(&loop_coord, cx);
                     }
                     step_linux_pill_window(&loop_coord, cx);
                     motion::poll_tune();
-                    if loop_coord.read(cx).switcher.is_held() {
+                    if quitting.is_some() {
+                        // The shortcut's hold and Esc don't count any more.
+                    } else if loop_coord.read(cx).switcher.is_held() {
                         loop_coord.update(cx, |coord, cx| coord.tick_switcher(cx));
                     } else if loop_coord.read(cx).telemetry.take_escape()
                         && loop_coord.read(cx).is_selecting()
@@ -5855,8 +5875,8 @@ pub fn run_app(
                 if quitting.is_some_and(|since| {
                     !crate::platform::recorders_running() || since.elapsed() >= QUIT_WAIT
                 }) {
-                    if let Some(path) = &socket_path {
-                        let _ = std::fs::remove_file(path);
+                    if let Some(instance) = &instance {
+                        instance.remove_socket();
                     }
                     let _ = cx.update(|cx| cx.quit());
                     break;

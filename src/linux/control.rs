@@ -4,11 +4,13 @@
 //! second `scrawl app` from starting. The directory is the owner-only one the recorder's
 //! pidfile uses, and a peer must be the same user.
 
+use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -99,19 +101,60 @@ fn check_private(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Binds the socket for this app: a live app there stops this one; a stale socket is
+/// The running app's hold on `scrawl/`: the instance lock (released when the process ends,
+/// however it ends) and the socket to remove on Quit.
+pub struct Instance {
+    socket: PathBuf,
+    _lock: File,
+}
+
+impl Instance {
+    /// Quit: the socket goes, so `scrawl toggle` falls back to the headless recorder.
+    pub fn remove_socket(&self) {
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+/// Takes `scrawl/app.lock` for this app's lifetime; `None` when another app holds it.
+fn lock_instance(dir: &Path) -> Result<Option<File>> {
+    let path = dir.join("app.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .with_context(|| format!("Could not open {}", path.display()))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(error).with_context(|| format!("Could not lock {}", path.display()))
+}
+
+/// Binds the socket for this app. The instance lock comes first, so two apps starting at once
+/// can't both get past it; then a live app on the socket stops this one, and a stale socket is
 /// replaced.
-pub fn bind() -> Result<(UnixListener, PathBuf)> {
+pub fn bind() -> Result<(UnixListener, Instance)> {
     let path = socket_path().context("No per-user runtime or state directory")?;
     let dir = path.parent().context("The socket path has no directory")?;
     create_runtime_dir(dir)?;
     check_private(dir)?;
-    match existing(&UnixStream::connect(&path).map(drop))? {
-        Existing::Live => bail!(
+    let already = || {
+        anyhow::anyhow!(
             "Scrawl is already running (it answers on {}): `scrawl toggle` records with it, and \
              Quit Scrawl in its tray menu ends it",
             path.display()
-        ),
+        )
+    };
+    let lock = lock_instance(dir)?.ok_or_else(already)?;
+    match existing(&UnixStream::connect(&path).map(drop))? {
+        Existing::Live => return Err(already()),
         Existing::Stale => {
             scrawl_log(format!(
                 "Replacing a stale control socket at {}",
@@ -125,7 +168,46 @@ pub fn bind() -> Result<(UnixListener, PathBuf)> {
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("Could not listen on {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    Ok((listener, path))
+    Ok((
+        listener,
+        Instance {
+            socket: path,
+            _lock: lock,
+        },
+    ))
+}
+
+/// Set by SIGTERM, SIGINT or SIGHUP; the app's run loop treats it as Quit.
+static QUIT_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_quit_signal(_: libc::c_int) {
+    QUIT_SIGNAL.store(true, Ordering::Release);
+}
+
+/// SIGTERM, SIGINT and SIGHUP quit the app the way its Quit item does (the recording is
+/// cancelled and its `wf-recorder` stopped, the socket removed). SIGKILL can't be caught: it
+/// leaves `wf-recorder` running and a stale socket, which the next app replaces.
+pub fn install_quit_signals() {
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        let installed = unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_quit_signal as extern "C" fn(libc::c_int) as usize;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&raw mut action.sa_mask);
+            libc::sigaction(signal, &raw const action, std::ptr::null_mut())
+        };
+        if installed != 0 {
+            scrawl_log(format!(
+                "Could not handle signal {signal}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+}
+
+/// A quit signal arrived (`install_quit_signals`).
+pub fn quit_signalled() -> bool {
+    QUIT_SIGNAL.load(Ordering::Acquire)
 }
 
 /// The uid of the process at the other end.

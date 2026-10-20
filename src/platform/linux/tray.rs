@@ -124,43 +124,46 @@ impl ksni::Tray for ScrawlTray {
     }
 }
 
-/// The running tray; `set_recording` keeps its icon and first row current.
+/// A change for the tray's worker.
+enum Update {
+    Recording(bool),
+    Shortcut(String),
+}
+
+/// The tray, run by a worker thread: ksni's blocking calls wait on the session bus, and a
+/// wedged bus must not freeze the UI. `set_recording` and `set_shortcut` only queue changes.
 pub struct Tray {
-    handle: ksni::blocking::Handle<ScrawlTray>,
+    updates: flume::Sender<Update>,
     recording: bool,
     shortcut: String,
 }
 
 impl Tray {
-    /// Shows the tray, or logs why it can't (no tray host on the bus) and returns `None`.
-    pub fn start(
-        shortcut: String,
-        on_item: impl Fn(TrayItem) + Send + Sync + 'static,
-    ) -> Option<Self> {
+    /// Starts the worker, which shows the tray or logs why it can't (no tray host on the bus).
+    pub fn start(shortcut: String, on_item: impl Fn(TrayItem) + Send + Sync + 'static) -> Self {
+        let (updates, queue) = flume::unbounded();
         let tray = ScrawlTray {
             recording: false,
             shortcut: shortcut.clone(),
             on_item: Arc::new(on_item),
         };
-        match tray.spawn() {
-            Ok(handle) => Some(Self {
-                handle,
-                recording: false,
-                shortcut,
-            }),
-            Err(error) => {
-                scrawl_log(format!(
-                    "Tray: none ({error}); is a StatusNotifierItem host (waybar's tray) running?"
-                ));
-                None
-            }
+        let spawned = std::thread::Builder::new()
+            .name("scrawl-tray".into())
+            .spawn(move || run(tray, &queue));
+        if let Err(error) = spawned {
+            scrawl_log(format!("Tray: could not start its thread: {error}"));
+        }
+        Self {
+            updates,
+            recording: false,
+            shortcut,
         }
     }
 
     pub fn set_recording(&mut self, recording: bool) {
         if recording != self.recording {
             self.recording = recording;
-            self.handle.update(|tray| tray.recording = recording);
+            let _ = self.updates.send(Update::Recording(recording));
         }
     }
 
@@ -168,9 +171,27 @@ impl Tray {
     pub fn set_shortcut(&mut self, shortcut: &str) {
         if shortcut != self.shortcut {
             self.shortcut = shortcut.to_owned();
-            let shortcut = self.shortcut.clone();
-            self.handle.update(|tray| tray.shortcut = shortcut);
+            let _ = self.updates.send(Update::Shortcut(shortcut.to_owned()));
         }
+    }
+}
+
+/// The worker: shows the tray, then applies changes until the app goes away.
+fn run(tray: ScrawlTray, queue: &flume::Receiver<Update>) {
+    let handle = match tray.spawn() {
+        Ok(handle) => handle,
+        Err(error) => {
+            scrawl_log(format!(
+                "Tray: none ({error}); is a StatusNotifierItem host (waybar's tray) running?"
+            ));
+            return;
+        }
+    };
+    while let Ok(update) = queue.recv() {
+        handle.update(|tray| match update {
+            Update::Recording(recording) => tray.recording = recording,
+            Update::Shortcut(shortcut) => tray.shortcut = shortcut,
+        });
     }
 }
 
