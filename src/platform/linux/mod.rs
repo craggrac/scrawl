@@ -98,10 +98,17 @@ pub fn start_global_input_tap(telemetry: std::sync::Arc<SharedCaptureTelemetry>)
     let matcher = std::sync::Arc::clone(&telemetry);
     hotkey::start(
         move |code, cmd, ctrl, alt, shift| matcher.matches_shortcut(code, cmd, ctrl, alt, shift),
-        move |action| match action {
-            KeyAction::Shortcut => telemetry.press_shortcut_from(PressSource::Keys),
-            KeyAction::Escape => telemetry.note_escape(),
-            KeyAction::None => {}
+        move |action| {
+            // The listener reads the keyboards under the lock screen too; what is typed into
+            // hyprlock is not for Scrawl. Asked only when the shortcut or Esc goes down.
+            if action == KeyAction::None || crate::linux::hypr::session_locked() {
+                return;
+            }
+            match action {
+                KeyAction::Shortcut => telemetry.press_shortcut_from(PressSource::Keys),
+                KeyAction::Escape => telemetry.note_escape(),
+                KeyAction::None => {}
+            }
         },
     );
 }

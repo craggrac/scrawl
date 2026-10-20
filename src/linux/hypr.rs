@@ -572,6 +572,25 @@ pub fn display_target_at(monitors: &[Monitor], point: Option<[f64; 2]>) -> Optio
     })
 }
 
+/// `j/locked`'s reply (`{"locked": true}`): whether the session lock (hyprlock) is up.
+pub fn parse_locked(reply: &[u8]) -> Option<bool> {
+    #[derive(Deserialize)]
+    struct Locked {
+        locked: bool,
+    }
+    serde_json::from_slice::<Locked>(reply)
+        .ok()
+        .map(|reply| reply.locked)
+}
+
+/// Whether the screen is locked; `false` when Hyprland can't say.
+pub fn session_locked() -> bool {
+    hypr_request("j/locked")
+        .ok()
+        .and_then(|reply| parse_locked(&reply))
+        .unwrap_or(false)
+}
+
 /// `activewindow`'s reply; `{}` when nothing has focus.
 pub fn parse_active_window(reply: &[u8]) -> Option<Client> {
     serde_json::from_slice(reply).ok()
@@ -916,6 +935,13 @@ mod tests {
                 "size 520 84, class:^(scrawl-pill)$",
             ]
         );
+    }
+
+    #[test]
+    fn the_lock_state_is_read_from_hyprland() {
+        assert_eq!(parse_locked(b"\n{\n    \"locked\": false\n}\n"), Some(false));
+        assert_eq!(parse_locked(br#"{"locked": true}"#), Some(true));
+        assert_eq!(parse_locked(b"unknown request"), None);
     }
 
     #[test]

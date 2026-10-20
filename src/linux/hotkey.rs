@@ -1,7 +1,8 @@
-//! The capture shortcut and Esc while `scrawl app` runs, read from the evdev devices like
-//! `input::InputRecorder` (passively, never grabbed). The Hyprland bind only reports a press;
-//! this also sees the modifiers come up, which is what holding the shortcut to open the mode
-//! switcher needs (`modifier_bits`, behind `platform::modifier_flags`).
+//! The capture shortcut and Esc while `scrawl app` runs, read from the evdev keyboards the way
+//! `input::InputRecorder` reads its devices (passively, never grabbed). The Hyprland bind only
+//! reports a press; this also sees the modifiers come up, which is what holding the shortcut to
+//! open the mode switcher needs (`modifier_bits`, behind `platform::modifier_flags`). Under
+//! the lock screen nothing is reported (`hypr::session_locked`).
 //!
 //! Privacy: a key is only compared against the shortcut and Esc as it is read. Nothing but
 //! the four modifier states is kept, and no other key leaves this module.
@@ -11,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::input::{
-    EV_KEY, EV_SYN, Layout, Modifiers, RawEvent, SYN_DROPPED, drain, key_name, open_devices,
+    EV_KEY, EV_SYN, Layout, Modifiers, RawEvent, SYN_DROPPED, drain, key_name, open_keyboards,
     poll_readable,
 };
 use crate::capture::scrawl_log;
@@ -152,7 +153,7 @@ fn listen(is_shortcut: &dyn Fn(u16, bool, bool, bool, bool) -> bool, on_key: &dy
             // release, and the switcher would think it still held.
             let open: Vec<u64> = devices.iter().filter_map(device_number).collect();
             devices.extend(
-                open_devices()
+                open_keyboards()
                     .into_iter()
                     .filter(|file| device_number(file).is_some_and(|n| !open.contains(&n))),
             );

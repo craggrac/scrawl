@@ -445,8 +445,8 @@ pub fn bit_set(bits: &[u8], code: u16) -> bool {
         .is_some_and(|byte| byte & (1 << (code % 8)) != 0)
 }
 
-/// A pointer (has `BTN_LEFT`) or a keyboard (has `KEY_A`).
-fn wanted(file: &File) -> bool {
+/// A device's `EV_KEY` capability bits, if it says.
+fn key_bits(file: &File) -> Option<[u8; 96]> {
     let mut bits = [0u8; 96];
     let rc = unsafe {
         libc::ioctl(
@@ -455,11 +455,30 @@ fn wanted(file: &File) -> bool {
             bits.as_mut_ptr(),
         )
     };
-    rc >= 0 && (bit_set(&bits, BTN_LEFT) || bit_set(&bits, KEY_A))
+    (rc >= 0).then_some(bits)
+}
+
+/// A pointer (has `BTN_LEFT`) or a keyboard (has `KEY_A`).
+fn wanted(file: &File) -> bool {
+    key_bits(file).is_some_and(|bits| bit_set(&bits, BTN_LEFT) || bit_set(&bits, KEY_A))
+}
+
+/// A keyboard (has `KEY_A`).
+fn is_keyboard(file: &File) -> bool {
+    key_bits(file).is_some_and(|bits| bit_set(&bits, KEY_A))
 }
 
 /// Every readable pointer or keyboard under `/dev/input`; the others are skipped.
-pub(crate) fn open_devices() -> Vec<File> {
+fn open_devices() -> Vec<File> {
+    open_matching(wanted)
+}
+
+/// Every readable keyboard under `/dev/input`.
+pub(crate) fn open_keyboards() -> Vec<File> {
+    open_matching(is_keyboard)
+}
+
+fn open_matching(keep: fn(&File) -> bool) -> Vec<File> {
     let Ok(entries) = std::fs::read_dir("/dev/input") else {
         return Vec::new();
     };
@@ -482,7 +501,7 @@ pub(crate) fn open_devices() -> Vec<File> {
                 .open(path)
                 .ok()
         })
-        .filter(wanted)
+        .filter(|file| keep(file))
         .collect()
 }
 
