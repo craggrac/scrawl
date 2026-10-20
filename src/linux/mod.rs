@@ -131,8 +131,11 @@ fn capture_into(
     };
     // From here the recording is never deleted, however later steps fail.
     let finish = || -> Result<PathBuf> {
-        let window_log = (target.mode == CaptureMode::Display)
-            .then(|| hypr::WindowLogger::start(target.frame, started_at, Arc::default()));
+        let request = Arc::new(AtomicBool::new(false));
+        let window_log = (target.mode == CaptureMode::Display).then(|| {
+            hypr::WindowLogger::start(target.frame, started_at, Arc::clone(&request))
+        });
+        let input = input::InputRecorder::start(target.frame, started_at, request);
         notify(&if until_stopped {
             "Recording. Press the shortcut again to stop.".to_owned()
         } else {
@@ -141,7 +144,9 @@ fn capture_into(
         wait_for_stop(duration, until_stopped);
         restore_default_signals();
         toggle::clear_pidfile();
-        let recording = session.stop()?;
+        // The input thread stops first: the screen session needs its events to pick frames.
+        let events = input.stop();
+        let recording = session.stop(&events)?;
         let activity = window_log.map(hypr::WindowLogger::stop).unwrap_or_default();
         let recorded_audio = audio.and_then(|a| {
             a.stop()
@@ -161,7 +166,7 @@ fn capture_into(
             target,
             recording,
             Vec::new(),
-            Vec::new(),
+            events,
             recorded_audio,
             note,
             activity,

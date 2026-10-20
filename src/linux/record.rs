@@ -14,7 +14,7 @@ use crate::capture::{
     CANDIDATE_BUDGET_BYTES, CANDIDATE_EDGE, FRAME_SAMPLE_INTERVAL, ScreenRecording,
 };
 use crate::helper::FrameTimes;
-use crate::model::{CaptureMode, TargetFrame, TargetInfo};
+use crate::model::{CaptureMode, InteractionEvent, TargetFrame, TargetInfo};
 
 /// How long the first frame may take before a silent screen is assumed (wf-recorder only
 /// writes on damage).
@@ -51,6 +51,35 @@ pub fn sample_interval_ms(duration_ms: u64, frame_bytes: usize) -> u64 {
         interval *= 2;
     }
     interval
+}
+
+/// How long after a click or drag end the screen is sampled, so the keyframe shows its result.
+const URGENT_DELAY_MS: u64 = 250;
+
+/// Movie times to decode for the screen's reaction to each click and drag end: the event time
+/// (capture clock) plus `URGENT_DELAY_MS`, moved onto the movie clock by `video_offset_ms`,
+/// clamped to `video_duration_ms`, sorted and deduplicated.
+pub fn urgent_frame_times(
+    events: &[InteractionEvent],
+    video_offset_ms: u64,
+    video_duration_ms: u64,
+) -> Vec<u64> {
+    let mut times: Vec<u64> = events
+        .iter()
+        .filter_map(|event| match event {
+            InteractionEvent::Click { t, .. } => Some(*t),
+            InteractionEvent::Drag { t1, .. } => Some(*t1),
+            _ => None,
+        })
+        .map(|t| {
+            (t + URGENT_DELAY_MS)
+                .saturating_sub(video_offset_ms)
+                .min(video_duration_ms)
+        })
+        .collect();
+    times.sort_unstable();
+    times.dedup();
+    times
 }
 
 fn spawn(target: &TargetInfo, video: &Path, codec: &str) -> Result<Child> {
@@ -173,9 +202,10 @@ impl ScreenSession {
         })
     }
 
-    /// Stops wf-recorder and decodes the candidate frames. `duration_ms` is the whole
-    /// session on the capture clock (the video may be shorter: wf-recorder writes on damage).
-    pub fn stop(mut self) -> Result<ScreenRecording> {
+    /// Stops wf-recorder and decodes the candidate frames, plus one shortly after each click
+    /// and drag in `events`. `duration_ms` is the whole session on the capture clock (the
+    /// video may be shorter: wf-recorder writes on damage).
+    pub fn stop(mut self, events: &[InteractionEvent]) -> Result<ScreenRecording> {
         let status = terminate(&mut self.child)?;
         let duration_ms = self.started_at.elapsed().as_millis() as u64;
         if !status.success() && status.signal() != Some(libc::SIGINT) && status.code() != Some(130)
@@ -195,6 +225,21 @@ impl ScreenSession {
         .with_context(unusable)?;
         if frames.is_empty() {
             bail!("No frames could be decoded from {}", self.video.display());
+        }
+        let urgent = urgent_frame_times(events, self.video_offset_ms, probe.duration_ms);
+        let wanted: Vec<u64> = urgent
+            .into_iter()
+            .filter(|t| frames.iter().all(|f| f.t_ms != *t))
+            .collect();
+        if !wanted.is_empty() {
+            match crate::helper::frames(&self.video, FrameTimes::At(&wanted), CANDIDATE_EDGE as u32)
+            {
+                Ok(extra) => frames.extend(extra),
+                Err(error) => crate::capture::scrawl_log(format!(
+                    "Frames after clicks could not be decoded: {error:#}"
+                )),
+            }
+            frames.sort_by_key(|f| f.t_ms);
         }
         for frame in &mut frames {
             frame.t_ms += self.video_offset_ms;
@@ -231,6 +276,56 @@ mod tests {
         let interval = sample_interval_ms(30 * 60_000, frame);
         assert!(interval > 220);
         assert!((30 * 60_000 / interval + 1) as usize * frame <= CANDIDATE_BUDGET_BYTES);
+    }
+
+    fn click(t: u64) -> InteractionEvent {
+        InteractionEvent::Click {
+            t,
+            x: 0.0,
+            y: 0.0,
+            button: None,
+            label: None,
+            role: None,
+        }
+    }
+
+    fn drag(t: u64, t1: u64) -> InteractionEvent {
+        InteractionEvent::Drag {
+            t,
+            t1,
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 1.0,
+            label: None,
+            button: None,
+            path: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn urgent_times_follow_clicks_and_drag_ends_on_the_movie_clock() {
+        let events = [drag(1_000, 2_000), click(5_000), click(300)];
+        // Offset 100: movie time = capture time + 250 - 100.
+        assert_eq!(
+            urgent_frame_times(&events, 100, 60_000),
+            vec![450, 2_150, 5_150]
+        );
+    }
+
+    #[test]
+    fn urgent_times_are_clamped_deduplicated_and_ignore_other_events() {
+        let scroll = InteractionEvent::Scroll {
+            t: 10,
+            x: 0.0,
+            y: 0.0,
+            dx: 0.0,
+            dy: 1.0,
+            label: None,
+        };
+        let events = [click(9_900), click(9_950), scroll, click(0)];
+        assert_eq!(urgent_frame_times(&events, 500, 9_680), vec![0, 9_650, 9_680]);
+        assert!(urgent_frame_times(&[], 0, 10_000).is_empty());
     }
 
     #[test]

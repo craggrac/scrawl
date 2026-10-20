@@ -35,7 +35,14 @@ bind = ALT SHIFT, S, exec, scrawl toggle
 
 Press it to start and again to stop. The bundle lands in `~/.local/share/scrawl/captures/` and its
 summary on the clipboard; `scrawl send latest --session ses_…` delivers it to OpenCode. Not yet on
-Linux: ink, clicks and keys in the timeline, the pill and menu-bar app, iPhone capture, video export.
+Linux: ink, the pill and menu-bar app, iPhone capture, video export.
+
+While recording, Scrawl notes clicks, drags, scrolling and Ctrl/Super shortcuts (for example
+`Ctrl+L`) from the input devices, and the keyframes around them say "clicked ..." or "scrolled
+down". It never records typing: plain keys, and Shift or Alt combinations, are not looked at.
+This needs read access to `/dev/input/event*`, which on most distributions means being in the
+`input` group (`sudo usermod -aG input $USER`, then log in again). Without it recording still
+works, just without these events.
 
 ## Agents
 

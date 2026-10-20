@@ -455,20 +455,9 @@ impl InputRecorder {
             .take()
             .and_then(|w| w.join().ok())
             .unwrap_or_default();
-        events.sort_by_key(event_time);
+        events.sort_by_key(InteractionEvent::timestamp_ms);
         scrawl_log(format!("Input: {} events recorded", events.len()));
         events
-    }
-}
-
-fn event_time(event: &InteractionEvent) -> u64 {
-    match event {
-        InteractionEvent::Click { t, .. }
-        | InteractionEvent::Drag { t, .. }
-        | InteractionEvent::Scroll { t, .. }
-        | InteractionEvent::Key { t, .. }
-        | InteractionEvent::Point { t, .. } => *t,
-        _ => 0,
     }
 }
 
