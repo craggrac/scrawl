@@ -1143,6 +1143,8 @@ mod tests {
             include_str!("onboarding.rs"),
             include_str!("settings.rs"),
             include_str!("ui.rs"),
+            include_str!("ui/appkit.rs"),
+            include_str!("platform/mac.rs"),
             include_str!("../helper/Onboarding.swift"),
             include_str!("../helper/Settings.swift"),
             include_str!("../helper/PermissionPanel.swift"),
