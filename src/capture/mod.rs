@@ -114,6 +114,10 @@ pub fn scrawl_log(msg: impl AsRef<str>) {
         .as_millis();
     let line = format!("[{ts}] {}\n", msg.as_ref());
     eprint!("{line}");
+    // Tests log a lot of fake activity; keep it out of the user's real log.
+    if cfg!(test) {
+        return;
+    }
     #[cfg(target_os = "macos")]
     let dir = dirs::home_dir().map(|home| home.join("Library/Logs/Scrawl"));
     #[cfg(not(target_os = "macos"))]

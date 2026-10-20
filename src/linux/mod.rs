@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::audio::AudioRecorder;
+use crate::audio::{self, AudioRecorder};
 use crate::capture::scrawl_log;
 use crate::handoff;
 use crate::model::CaptureMode;
@@ -147,6 +147,14 @@ fn capture_into(
                 .inspect_err(|error| scrawl_log(format!("Audio: {error:#}")))
                 .ok()
         });
+        if recorded_audio
+            .as_ref()
+            .and_then(|a| audio::decode_wav_16k(&a.wav_bytes).ok())
+            .is_some_and(|samples| parakeet::is_digital_silence(&samples))
+        {
+            scrawl_log("Microphone: recorded only digital silence (muted?)");
+            notify("The microphone recorded only silence. Is it muted?");
+        }
         let (dir, _bundle, summary) = crate::finalize_capture_bundle(
             bundle_dir,
             target,

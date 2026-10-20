@@ -77,6 +77,24 @@ pub fn words(result: &SherpaResult, offset_ms: u64) -> Vec<WordTiming> {
     words
 }
 
+/// Exact zeros throughout: a muted microphone, not a quiet room.
+pub fn is_digital_silence(samples: &[f32]) -> bool {
+    !samples.is_empty() && samples.iter().all(|&sample| sample == 0.0)
+}
+
+/// What Parakeet says for noise with no speech in it. A clip that comes back with nothing but
+/// these words is dropped; the same words inside real speech stay.
+const PHANTOM_WORDS: [&str; 7] = ["obrigado", "obrigada", "thank", "thanks", "you", "tchau", "bye"];
+
+/// Whether a clip's words are only `PHANTOM_WORDS`.
+pub fn is_phantom(words: &[WordTiming]) -> bool {
+    !words.is_empty()
+        && words.iter().all(|word| {
+            let bare = word.text.trim_matches(|c: char| !c.is_alphanumeric());
+            PHANTOM_WORDS.contains(&bare.to_lowercase().as_str())
+        })
+}
+
 /// Words grouped into sentences, as `hex::spread_words` groups its estimates.
 pub fn segments(words: &[WordTiming]) -> Vec<TranscriptSegment> {
     let mut segments = Vec::new();
@@ -276,13 +294,16 @@ pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
     })?;
     let samples = audio::decode_wav_16k(&std::fs::read(wav)?)?;
     let duration_ms = samples.len() as u64 / SAMPLES_PER_MS;
-    // No islands (too quiet to find speech by energy): Parakeet hears the whole thing.
-    let clips = plan_clips(&audio::speech_islands(&samples), duration_ms);
     let mut transcript = TranscriptData {
         source: "parakeet".into(),
         model: Some(MODEL_NAME.into()),
         ..Default::default()
     };
+    if is_digital_silence(&samples) {
+        return Ok(transcript);
+    }
+    // No islands (too quiet to find speech by energy): Parakeet hears the whole thing.
+    let clips = plan_clips(&audio::speech_islands(&samples), duration_ms);
     if clips.is_empty() {
         return Ok(transcript);
     }
@@ -297,7 +318,16 @@ pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
             continue;
         }
         match server.transcribe(&samples[from..to]) {
-            Ok(result) => transcript.words.extend(words(&result, from_ms)),
+            Ok(result) => {
+                let clip_words = words(&result, from_ms);
+                if is_phantom(&clip_words) {
+                    crate::capture::scrawl_log(format!(
+                        "Parakeet heard only noise at {start} ms; dropped its words"
+                    ));
+                } else {
+                    transcript.words.extend(clip_words);
+                }
+            }
             Err(error) => {
                 failed += 1;
                 crate::capture::scrawl_log(format!(
@@ -364,6 +394,32 @@ mod tests {
         let words = words(&result, 0);
         assert_eq!((words[0].t0, words[0].t1), (500, 1_000));
         assert_eq!((words[1].t0, words[1].t1), (1_000, 1_080));
+    }
+
+    fn spoken(texts: &[&str]) -> Vec<WordTiming> {
+        texts
+            .iter()
+            .map(|text| WordTiming {
+                t0: 0,
+                t1: 0,
+                text: (*text).to_owned(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_clip_of_only_thanks_is_phantom() {
+        assert!(is_phantom(&spoken(&["Obrigado.", "Obrigado."])));
+        assert!(is_phantom(&spoken(&["Thank", "you."])));
+        assert!(!is_phantom(&spoken(&["Obrigado", "pela", "ajuda."])));
+        assert!(!is_phantom(&[]));
+    }
+
+    #[test]
+    fn only_exact_zeros_are_digital_silence() {
+        assert!(is_digital_silence(&[0.0; 160]));
+        assert!(!is_digital_silence(&[0.0, 0.0, 0.0001]));
+        assert!(!is_digital_silence(&[]));
     }
 
     #[test]
