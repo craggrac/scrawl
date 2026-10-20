@@ -28,8 +28,20 @@ pub const OPENED_IN_FILE_MANAGER: &str = "Opened in Files";
 
 /// Opens `dir` in the file manager.
 pub fn open_in_file_manager(dir: &Path) {
-    if let Err(error) = std::process::Command::new("xdg-open").arg(dir).spawn() {
-        scrawl_log(format!("xdg-open {}: {error}", dir.display()));
+    let mut child = match std::process::Command::new("xdg-open").arg(dir).spawn() {
+        Ok(child) => child,
+        Err(error) => return scrawl_log(format!("xdg-open {}: {error}", dir.display())),
+    };
+    // Reaped off the UI thread, so it doesn't stay a zombie.
+    let spawned = std::thread::Builder::new()
+        .name("xdg-open".into())
+        .spawn(move || match child.wait() {
+            Ok(status) if !status.success() => scrawl_log(format!("xdg-open: {status}")),
+            Ok(_) => {}
+            Err(error) => scrawl_log(format!("xdg-open: {error}")),
+        });
+    if let Err(error) = spawned {
+        scrawl_log(format!("xdg-open: could not wait for it: {error}"));
     }
 }
 
