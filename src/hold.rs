@@ -4,7 +4,7 @@
 //! recording shows the same modes as chips in its capsule for a few seconds (`Reveal`), so the
 //! target can still change and nobody has to know about holding.
 
-use crate::ui::SelectionMode;
+use crate::selection::SelectionMode;
 
 /// ⌥⇧ released sooner than this after the press is a tap: record the screen, no switcher.
 pub const TAP_MS: u64 = 250;

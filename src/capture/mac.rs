@@ -199,29 +199,6 @@ unsafe extern "C" {
     static kCFRunLoopCommonModes: *const c_void;
 }
 
-/// Live UI events emitted by the global input monitor to drive Scrawl's HUD & Review windows.
-#[derive(Clone, Debug)]
-pub enum LiveOverlayEvent {
-    /// ⌥⇧S (or the configured shortcut) went down; `hold::Switcher` decides what it means.
-    CaptureShortcut,
-    PasteLatestShortcut,
-    UndoStroke,
-    CancelCapture,
-    RequestSnapshot,
-    /// The iPhone mirror ended on its own (unplugged, never found, or access denied).
-    PhoneEnded,
-    /// The welcome window: a button, fresh permission states, or the helper exiting.
-    Onboarding(crate::onboarding::Event),
-    /// The Settings window: an action, fresh permission states, or the helper exiting.
-    Settings(crate::settings::Event),
-    /// A ScrawlKit recording was ingested from an iPhone and compiled into a `.scrawl` bundle.
-    IngestedBundle {
-        dir: PathBuf,
-        bundle: Box<crate::model::ScrawlBundle>,
-        status: Option<String>,
-    },
-}
-
 static LAYOUT_KEY_CODES: std::sync::OnceLock<std::collections::HashMap<char, u16>> =
     std::sync::OnceLock::new();
 /// The reverse view for naming shortcuts: virtual keycode -> the character ⌘ + that key types.

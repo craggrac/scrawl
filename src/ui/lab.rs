@@ -10,8 +10,8 @@ use gpui::{
 };
 
 use super::{ScrawlCoordinator, SelectionMode, motion};
-use crate::capture::SharedCaptureTelemetry;
 use crate::model::{CaptureMode, TargetFrame, TargetInfo};
+use crate::platform::SharedCaptureTelemetry;
 
 /// How long a pretend recording "processes" before it's done.
 pub(super) const PROCESSING_S: f32 = 0.8;

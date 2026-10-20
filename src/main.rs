@@ -32,11 +32,15 @@ mod native;
 mod onboarding;
 mod page;
 mod phone;
+#[cfg(target_os = "macos")]
+mod platform;
 mod render;
 mod retention;
 mod routing;
 #[cfg(target_os = "macos")]
 mod screens;
+#[cfg(target_os = "macos")]
+mod selection;
 #[cfg(target_os = "macos")]
 mod settings;
 mod sketch;

@@ -96,6 +96,31 @@ impl CandidateBuffer {
     }
 }
 
+/// Live UI events emitted by the global input monitor to drive Scrawl's HUD & Review windows.
+#[derive(Clone, Debug)]
+pub enum LiveOverlayEvent {
+    /// ⌥⇧S (or the configured shortcut) went down; `hold::Switcher` decides what it means.
+    CaptureShortcut,
+    PasteLatestShortcut,
+    UndoStroke,
+    CancelCapture,
+    RequestSnapshot,
+    /// The iPhone mirror ended on its own (unplugged, never found, or access denied).
+    PhoneEnded,
+    /// The welcome window: a button, fresh permission states, or the helper exiting.
+    #[cfg(target_os = "macos")]
+    Onboarding(crate::onboarding::Event),
+    /// The Settings window: an action, fresh permission states, or the helper exiting.
+    #[cfg(target_os = "macos")]
+    Settings(crate::settings::Event),
+    /// A ScrawlKit recording was ingested from an iPhone and compiled into a `.scrawl` bundle.
+    IngestedBundle {
+        dir: PathBuf,
+        bundle: Box<crate::model::ScrawlBundle>,
+        status: Option<String>,
+    },
+}
+
 /// What a finished screen capture leaves behind.
 pub struct ScreenRecording {
     /// Small candidate frames for keyframe selection (see `CANDIDATE_EDGE`).
