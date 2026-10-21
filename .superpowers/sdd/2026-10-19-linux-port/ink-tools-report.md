@@ -43,7 +43,7 @@ Undo takes the stroke out of the shared `strokes` list (the one `finish_session`
 
 ## Tests
 
-`cargo test` 457 passed, 0 failed, 2 ignored (was 405 + the phase's later ones; +52 mine): tracker (pens, switching, colours, undo, wake), scene/raster (colours, tip, crossing, tile damage, timing), sketch (arrow/box marks, descriptions, geometry), render (colours, arrow head, hollow box, unfinished figure), export plan unchanged shape tests still pass. `mc.sh` adapted copy in `/tmp/inkmc` (original untouched, pointed at the worktree): clean on both bin and tests.
+`cargo test` 457 passed, 0 failed, 2 ignored: tracker (pens, switching, colours, undo, wake), scene/raster (colours, tip, crossing, tile damage, timing), sketch (arrow/box marks, descriptions, geometry), render (colours, arrow head, hollow box, unfinished figure), export plan unchanged shape tests still pass. `mc.sh` adapted copy in `/tmp/inkmc` (original untouched, pointed at the worktree): clean on both bin and tests.
 
 ## Commits
 
@@ -54,7 +54,7 @@ Undo takes the stroke out of the shared `strokes` list (the one `finish_session`
 
 ## Needs live testing by the user
 
-1. Real keys under Hyprland: ⇧+Ctrl and ⇧+Alt feel (pressing the modifier at the start of the arrow; Ctrl pressed before ⇧ also works), that no Hyprland bind or app eats ⇧+Alt (some keyboards use Alt+Shift to switch layout: check `kb_options`), Firefox's Alt-tap menu bar.
+1. Real keys under Hyprland: ⇧+Ctrl and ⇧+Alt feel (pressing the modifier at the start of the arrow; Ctrl pressed before ⇧ also works), that no Hyprland bind or app eats ⇧+Alt (this setup has layouts `us,br` and no `kb_options`, so no Alt+Shift layout switch), Firefox's Alt-tap menu bar.
 2. Ctrl+Z side effect in the focused app during a recording (it also undoes there), and ⇧+1..4 typing `!@#$` into a focused text field.
 3. The tip dot's colour change on a digit and its readability (it is small, as before).
 4. Yellow on light pages (contrast), blue/green in the video (wf-recorder encodes the overlay: colour fidelity).
