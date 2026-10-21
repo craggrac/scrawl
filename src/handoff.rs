@@ -339,6 +339,10 @@ pub struct Config {
     /// the bundle (`dev_context`, default off).
     #[serde(default)]
     pub dev_context: Option<bool>,
+    /// Linux: window class patterns blurred out of captures (`linux::redact`); absent means
+    /// `linux::redact::DEFAULT_APPS`, an empty list turns the blurring off.
+    #[serde(default)]
+    pub redact_apps: Option<Vec<String>>,
     /// Linux: a browser's remote debugging port, for one whose `DevToolsActivePort` file isn't
     /// under `~/.config` (`devContext` looks there itself).
     #[serde(default)]
@@ -586,6 +590,12 @@ pub fn video_export() -> bool {
 #[cfg(target_os = "linux")]
 pub fn dev_context() -> bool {
     config().dev_context.unwrap_or(false)
+}
+
+/// The window patterns blurred out of captures (`redactApps`), if the config has any.
+#[cfg(target_os = "linux")]
+pub fn redact_apps() -> Option<Vec<String>> {
+    config().redact_apps
 }
 
 /// The browser debugging port named in the config (`cdpPort`).
