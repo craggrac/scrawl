@@ -39,26 +39,43 @@ pub fn parse_stat(text: &str) -> Option<Stat> {
     })
 }
 
-/// The inodes of TCP sockets listening on `port`, from the text of `/proc/net/tcp` or `tcp6`.
-pub fn listening_inodes(table: &str, port: u16) -> Vec<u64> {
+/// A TCP socket in the listening state: its inode, and the uid that owns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listener {
+    pub inode: u64,
+    pub uid: u32,
+}
+
+/// The sockets listening on `port`, from the text of `/proc/net/tcp` or `tcp6`.
+pub fn listeners(table: &str, port: u16) -> Vec<Listener> {
     table
         .lines()
         .skip(1)
         .filter_map(|line| {
             let fields: Vec<&str> = line.split_whitespace().collect();
             // sl local_address rem_address st tx:rx tr:when retrnsmt uid timeout inode
-            let (local, state, inode) = (*fields.get(1)?, *fields.get(3)?, *fields.get(9)?);
+            let (local, state) = (*fields.get(1)?, *fields.get(3)?);
             let local_port = u16::from_str_radix(local.rsplit_once(':')?.1, 16).ok()?;
             // 0A is TCP_LISTEN.
-            (state == "0A" && local_port == port)
-                .then(|| inode.parse().ok())
-                .flatten()
+            (state == "0A" && local_port == port).then_some(())?;
+            Some(Listener {
+                uid: fields.get(7)?.parse().ok()?,
+                inode: fields.get(9)?.parse().ok()?,
+            })
         })
         .collect()
 }
 
+/// The effective uid of this process.
+fn current_uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").map_or(u32::MAX, |meta| meta.uid())
+}
+
 pub struct Proc {
     root: PathBuf,
+    /// The user whose listeners are trusted.
+    uid: u32,
 }
 
 impl Proc {
@@ -67,7 +84,16 @@ impl Proc {
     }
 
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            uid: current_uid(),
+        }
+    }
+
+    #[cfg(test)]
+    fn as_user(mut self, uid: u32) -> Self {
+        self.uid = uid;
+        self
     }
 
     /// The working directory of `pid`; none when it is gone or isn't ours to read.
@@ -133,18 +159,21 @@ impl Proc {
         self.cwd(self.listener_pid(port)?)
     }
 
-    /// The pid of the process listening on TCP `port`.
+    /// The pid of the process listening on TCP `port`, only when it is ours to trust: every
+    /// socket listening on the port belongs to the current user (another user's listener there
+    /// could be anything pretending to be the browser or the dev server), and the one that
+    /// owns it resolves to a process whose descriptors can be read. Otherwise none.
     pub fn listener_pid(&self, port: u16) -> Option<i32> {
-        let mut inodes = Vec::new();
+        let mut found = Vec::new();
         for table in ["net/tcp", "net/tcp6"] {
             if let Ok(text) = std::fs::read_to_string(self.root.join(table)) {
-                inodes.extend(listening_inodes(&text, port));
+                found.extend(listeners(&text, port));
             }
         }
-        if inodes.is_empty() {
+        if found.is_empty() || found.iter().any(|listener| listener.uid != self.uid) {
             return None;
         }
-        let wanted: Vec<String> = inodes.iter().map(|inode| format!("socket:[{inode}]")).collect();
+        let wanted: Vec<String> = found.iter().map(|l| format!("socket:[{}]", l.inode)).collect();
         self.stats().into_iter().find_map(|stat| {
             let fds = std::fs::read_dir(self.root.join(stat.pid.to_string()).join("fd")).ok()?;
             fds.filter_map(Result::ok)
@@ -157,8 +186,60 @@ impl Proc {
     }
 }
 
+/// Fake `/proc` trees for the tests of this module and of the collector.
+#[cfg(test)]
+pub mod testing {
+    use super::*;
+
+    /// A fake `/proc`: `(pid, ppid, pgrp, tty, tpgid, cwd)`.
+    pub fn fake_proc(name: &str, processes: &[(i32, i32, i32, i32, i32, &str)]) -> (PathBuf, Proc) {
+        let root = std::env::temp_dir().join(format!("scrawl-proc-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for &(pid, ppid, pgrp, tty, tpgid, cwd) in processes {
+            let dir = root.join(pid.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("stat"),
+                format!("{pid} (p) S {ppid} {pgrp} {pgrp} {tty} {tpgid} 0"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(cwd, dir.join("cwd")).unwrap();
+        }
+        (root.clone(), Proc::at(root))
+    }
+
+    /// A fake `/proc` with `net/tcp` rows `(port, uid, inode)` and processes holding sockets:
+    /// `(pid, inode)`.
+    pub fn fake_proc_with_sockets(name: &str, rows: &[(u16, u32, u64)], holders: &[(i32, u64)]) -> (PathBuf, Proc) {
+        let processes: Vec<(i32, i32, i32, i32, i32, &str)> =
+            holders.iter().map(|&(pid, _)| (pid, 1, pid, 0, 0, "/srv")).collect();
+        let (root, proc) = fake_proc(name, &processes);
+        let mut table = String::from("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+        for (i, (port, uid, inode)) in rows.iter().enumerate() {
+            table.push_str(&format!(
+                "{i}: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 {uid} 0 {inode} 1 0 100 0 0 10 0\n"
+            ));
+        }
+        std::fs::create_dir_all(root.join("net")).unwrap();
+        std::fs::write(root.join("net/tcp"), table).unwrap();
+        for &(pid, inode) in holders {
+            let fd = root.join(pid.to_string()).join("fd");
+            std::fs::create_dir_all(&fd).unwrap();
+            std::os::unix::fs::symlink(format!("socket:[{inode}]"), fd.join("7")).unwrap();
+        }
+        (root, proc.as_user(1000))
+    }
+
+    /// A fake `/proc` where process 20 listens on `port` with a socket the table says belongs to
+    /// `uid`, as seen by the user 1000.
+    pub fn fake_listener(name: &str, port: u16, uid: u32) -> (PathBuf, Proc) {
+        fake_proc_with_sockets(name, &[(port, uid, 555)], &[(20, 555)])
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testing::*;
     use super::*;
 
     #[test]
@@ -185,26 +266,9 @@ mod tests {
              0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 11111 1 0 100 0 0 10 0\n\
              1: 0100007F:0BB8 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 22222 1 0 100 0 0 10 0\n\
              2: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 33333 1 0 100 0 0 10 0\n";
-        assert_eq!(listening_inodes(table, 3000), vec![11111]);
-        assert_eq!(listening_inodes(table, 8080), vec![33333]);
-        assert!(listening_inodes(table, 9999).is_empty());
-    }
-
-    /// A fake `/proc`: `(pid, ppid, pgrp, tty, tpgid, cwd)`.
-    fn fake_proc(name: &str, processes: &[(i32, i32, i32, i32, i32, &str)]) -> (PathBuf, Proc) {
-        let root = std::env::temp_dir().join(format!("scrawl-proc-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        for &(pid, ppid, pgrp, tty, tpgid, cwd) in processes {
-            let dir = root.join(pid.to_string());
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("stat"),
-                format!("{pid} (p) S {ppid} {pgrp} {pgrp} {tty} {tpgid} 0"),
-            )
-            .unwrap();
-            std::os::unix::fs::symlink(cwd, dir.join("cwd")).unwrap();
-        }
-        (root.clone(), Proc::at(root))
+        assert_eq!(listeners(table, 3000), vec![Listener { inode: 11111, uid: 1000 }]);
+        assert_eq!(listeners(table, 8080), vec![Listener { inode: 33333, uid: 1000 }]);
+        assert!(listeners(table, 9999).is_empty());
     }
 
     #[test]
@@ -267,5 +331,34 @@ mod tests {
         assert_eq!(proc.listener_cwd(port), Some(std::env::current_dir().unwrap()));
         drop(listener);
         assert_eq!(proc.listener_pid(port), None);
+    }
+
+    #[test]
+    fn a_listener_of_the_current_user_is_trusted() {
+        let (root, proc) = fake_proc_with_sockets("mine", &[(9222, 1000, 555)], &[(20, 555), (21, 556)]);
+        assert_eq!(proc.listener_pid(9222), Some(20));
+        assert_eq!(proc.listener_cwd(9222), Some(PathBuf::from("/srv")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn another_users_listener_is_not_the_browser_even_when_its_pid_resolves() {
+        // Root (uid 0) or another account listens on the port the browser's file names.
+        let (root, proc) = fake_proc_with_sockets("other-user", &[(9222, 0, 555)], &[(20, 555)]);
+        assert_eq!(proc.listener_pid(9222), None);
+        assert_eq!(proc.listener_cwd(9222), None);
+        let _ = std::fs::remove_dir_all(&root);
+        // Alongside ours, the port is ambiguous and so untrusted too.
+        let (root, proc) = fake_proc_with_sockets("shared", &[(9222, 1000, 555), (9222, 4242, 556)], &[(20, 555), (21, 556)]);
+        assert_eq!(proc.listener_pid(9222), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_listener_whose_pid_does_not_resolve_is_not_trusted() {
+        // Ours by uid, but no readable process holds the socket (another user's process, or gone).
+        let (root, proc) = fake_proc_with_sockets("unresolved", &[(9222, 1000, 555)], &[(20, 999)]);
+        assert_eq!(proc.listener_pid(9222), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

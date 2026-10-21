@@ -2,7 +2,9 @@
 //! `config.json`, off by default): the console errors, failed requests and page changes of the
 //! browser tab in front (`cdp`, only for a browser that already exposes the DevTools Protocol),
 //! the working directory of the terminal in front, and for each folder found the repository's
-//! branch, head and changes (`git`). One worker thread polls Hyprland's focused window and
+//! branch, head and changes (`git`). The page text is untrusted: only local pages are read
+//! (`cdp::is_local_page`), and a port counts as a browser only when a process of the current
+//! user listens on it (`procs`). One worker thread polls Hyprland's focused window and
 //! reads the browser's events; the repositories are read on short-lived threads, so a slow
 //! `git` never delays the events. The result is a `DevContext` on the capture clock.
 
@@ -34,6 +36,10 @@ const IDLE_WAIT: Duration = Duration::from_millis(40);
 const MAX_PROJECTS: usize = 4;
 /// Repositories still being read when the capture stops are waited for this long.
 const GIT_WAIT: Duration = Duration::from_millis(1_500);
+/// `stop` waits this long for the worker (a turn of its loop, `GIT_WAIT`, or the probe and
+/// handshake of the port it was connecting to) and then gives up on it: finishing a
+/// recording never hangs on the collector.
+const STOP_WAIT: Duration = Duration::from_millis(3_500);
 
 /// The collector of one recording. Dropping it without `stop` ends the worker.
 pub struct Collector {
@@ -63,8 +69,14 @@ impl Collector {
     }
 
     /// Ends collecting and returns what it found. Takes the worker's turn at most (tens of ms),
-    /// plus up to `GIT_WAIT` for a repository that is still being read.
-    pub fn stop(mut self) -> DevContext {
+    /// plus up to `GIT_WAIT` for a repository that is still being read; a worker that is
+    /// still stuck after `STOP_WAIT` is left behind (it ends on its own, the flag is set) and
+    /// nothing is returned.
+    pub fn stop(self) -> DevContext {
+        self.stop_within(STOP_WAIT)
+    }
+
+    fn stop_within(mut self, wait: Duration) -> DevContext {
         let began = Instant::now();
         self.stopping.store(true, Ordering::Release);
         let context = self
@@ -72,7 +84,16 @@ impl Collector {
             .take()
             .and_then(|worker| {
                 worker.thread().unpark();
-                worker.join().ok()
+                let deadline = began + wait;
+                while !worker.is_finished() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if worker.is_finished() {
+                    worker.join().ok()
+                } else {
+                    scrawl_log(format!("Dev context: the collector did not stop within {} ms; left behind", wait.as_millis()));
+                    None
+                }
             })
             .unwrap_or_default();
         scrawl_log(format!(
@@ -126,13 +147,29 @@ impl Sources {
 }
 
 /// The browsers that expose DevTools, connected: each with its protocol state and socket.
-fn connect_browsers(sources: &Sources) -> Vec<(Browser, Link)> {
+/// Only a port whose listener is a process of the current user is trusted to be a browser
+/// (any other local process could be listening there and answering as one); the others are
+/// skipped without a word to them. Each port takes at most the probe's and the handshake's
+/// deadlines, and `stopping` is looked at between ports.
+fn connect_browsers(sources: &Sources, stopping: &AtomicBool) -> Vec<(Browser, Link)> {
     let mut browsers = Vec::new();
     for port in cdp::candidate_ports(&sources.config_dir, sources.port) {
+        if stopping.load(Ordering::Acquire) {
+            return browsers;
+        }
+        let Some(pid) = sources.proc.listener_pid(port) else {
+            scrawl_log(format!(
+                "Dev context: port {port} skipped: its listener is not a process of this user"
+            ));
+            continue;
+        };
         let Some(path) = cdp::probe(port) else {
             continue;
         };
-        let mut browser = Browser::new(sources.proc.listener_pid(port));
+        if stopping.load(Ordering::Acquire) {
+            return browsers;
+        }
+        let mut browser = Browser::new(pid);
         let opened = Link::open(port, &path).and_then(|mut link| {
             for command in browser.start() {
                 link.send(command)?;
@@ -144,7 +181,7 @@ fn connect_browsers(sources: &Sources) -> Vec<(Browser, Link)> {
             Err(error) => scrawl_log(format!("Dev context: browser on port {port}: {error:#}")),
         }
     }
-    if browsers.is_empty() {
+    if browsers.is_empty() && !stopping.load(Ordering::Acquire) {
         scrawl_log(
             "Dev context: no browser exposes DevTools (start it with --remote-debugging-port=9222 \
              to collect its console and network errors)",
@@ -265,7 +302,7 @@ fn run(started_at: Instant, stopping: &AtomicBool, sources: Sources) -> DevConte
         .unwrap_or_default()
         .as_millis() as f64;
     let mut notes = Notes::new(epoch_ms - elapsed_ms() as f64);
-    let mut browsers = connect_browsers(&sources);
+    let mut browsers = connect_browsers(&sources, stopping);
     let mut projects = Projects::new(sources.proc);
     let mut last_focus: Option<Instant> = None;
     let mut handled_pages = 0;
@@ -383,5 +420,76 @@ mod tests {
         let began = Instant::now();
         assert!(collector.stop().is_empty());
         assert!(began.elapsed() < Duration::from_millis(300));
+    }
+
+    #[test]
+    fn a_collector_stuck_in_connecting_to_slow_listeners_stops_between_ports() {
+        // Three profile folders name ports whose listeners (this process) drip a byte per
+        // 100 ms: each probe takes its whole deadline, and `stop` must not wait for all three.
+        let config = std::env::temp_dir().join(format!("scrawl-ctx-drip-{}", std::process::id()));
+        for i in 0..3 {
+            let port = cdp::testing::drip_listener(Duration::from_millis(100));
+            std::fs::create_dir_all(config.join(format!("b{i}"))).unwrap();
+            std::fs::write(config.join(format!("b{i}/DevToolsActivePort")), format!("{port}\n/devtools/browser/x")).unwrap();
+        }
+        let sources = Sources {
+            focus: Box::new(|| None),
+            config_dir: config.clone(),
+            port: None,
+            proc: Proc::new(),
+        };
+        let collector = Collector::spawn(Instant::now(), sources).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let began = Instant::now();
+        assert!(collector.stop().is_empty());
+        // One probe's deadline at most (1 s), not three.
+        assert!(began.elapsed() < Duration::from_millis(1_800), "{:?}", began.elapsed());
+        let _ = std::fs::remove_dir_all(config);
+    }
+
+    #[test]
+    fn stop_gives_up_on_a_worker_that_does_not_return() {
+        // The focus lookup hangs (a Hyprland socket that never answers, say).
+        let sources = Sources {
+            focus: Box::new(|| {
+                std::thread::sleep(Duration::from_secs(3));
+                None
+            }),
+            config_dir: std::env::temp_dir().join("scrawl-ctx-hang"),
+            port: None,
+            proc: Proc::new(),
+        };
+        let collector = Collector::spawn(Instant::now(), sources).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let began = Instant::now();
+        assert!(collector.stop_within(Duration::from_millis(300)).is_empty());
+        assert!(began.elapsed() < Duration::from_millis(1_000), "{:?}", began.elapsed());
+    }
+
+    #[test]
+    fn a_port_whose_listener_is_not_this_users_is_not_connected_to() {
+        // A fake browser answers on a port, but the fake /proc says another user owns it.
+        let epoch_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as f64;
+        let browser_port = cdp::testing::fake_browser(epoch_ms, "http://localhost:3000/");
+        let config = std::env::temp_dir().join(format!("scrawl-ctx-spoof-{}", std::process::id()));
+        std::fs::create_dir_all(config.join("b")).unwrap();
+        std::fs::write(config.join("b/DevToolsActivePort"), format!("{browser_port}\n/devtools/browser/fake")).unwrap();
+        let sources = |proc: Proc| Sources {
+            focus: Box::new(|| None),
+            config_dir: config.clone(),
+            port: None,
+            proc,
+        };
+        let stopping = AtomicBool::new(false);
+        // Owned by root: skipped, and nothing is sent to it.
+        let (root, other_user) = procs::testing::fake_listener("spoof", browser_port, 0);
+        assert!(connect_browsers(&sources(other_user), &stopping).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+        // Owned by the current user: connected, with the owning pid as the browser's window.
+        let (root, same_user) = procs::testing::fake_listener("spoof-mine", browser_port, 1000);
+        let browsers = connect_browsers(&sources(same_user), &stopping);
+        assert_eq!(browsers.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(config);
     }
 }
