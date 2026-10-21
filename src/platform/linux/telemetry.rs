@@ -148,7 +148,8 @@ impl SharedCaptureTelemetry {
         self.escape.store(false, Ordering::Release);
     }
 
-    /// What the picker highlights (drawn by the overlay on macOS; phase 5 here).
+    /// What the picker highlights. Nothing draws it from here: the GPUI picker paints its own
+    /// dim from the same state (`picker_dim`).
     pub fn set_picker_rect(&self, rect: Option<([f32; 4], u8)>) {
         *self
             .picker_rect

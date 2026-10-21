@@ -4082,10 +4082,31 @@ impl Render for TargetPickerWindow {
             )
         });
 
-        // The 120Hz `MetalLaserOverlay` draws the backdrop dim, selection cutout, window tint,
-        // and inset border continuously across both `Selecting` and `Recording` so there is zero
-        // window swap or border jump on recording start. `TargetPickerWindow` only provides the
-        // hit-test surface, cursor style, camera cursor follower, and tabular dimension badge.
+        // On macOS the 120Hz `MetalLaserOverlay` draws the backdrop dim, selection cutout,
+        // window tint, and inset border continuously across both `Selecting` and `Recording` so
+        // there is zero window swap or border jump on recording start. `TargetPickerWindow` only
+        // provides the hit-test surface, cursor style, camera cursor follower, and tabular
+        // dimension badge. On Linux nothing carries over to the recording (the ink overlay is
+        // above everything and must not dim), so the picker draws its own dim.
+        #[cfg(target_os = "linux")]
+        let dim = {
+            use crate::platform::picker_dim;
+            let kind = match mode {
+                SelectionMode::Area => picker_dim::KIND_AREA,
+                SelectionMode::Window | SelectionMode::Screen => picker_dim::KIND_WINDOW,
+                SelectionMode::Iphone => 3,
+            };
+            if picker_fade < 1.0 {
+                window.request_animation_frame();
+            }
+            picker_dim::dim_shape(
+                kind,
+                highlight.as_ref().map(|(rect, _)| *rect),
+                screen,
+                picker_fade,
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
         let _ = picker_fade;
         let mut root = div()
             .id("scrawl-target-picker")
@@ -4100,6 +4121,20 @@ impl Render for TargetPickerWindow {
             .when(mode == SelectionMode::Window, |d| {
                 d.cursor(gpui::CursorStyle::None)
             });
+
+        #[cfg(target_os = "linux")]
+        {
+            root = root.child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, _| {
+                        crate::platform::picker_dim::paint(window, bounds, &dim);
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
+        }
 
         if mode == SelectionMode::Window
             && let Some([px_screen, py_screen]) = pointer
