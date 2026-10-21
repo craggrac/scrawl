@@ -1,7 +1,7 @@
 //! The Linux Settings window. It draws `settings::View` and turns clicks and keys into
 //! `settings::Action`s, like the SwiftUI window on macOS does through the helper; the `Panel`
 //! decides and writes everything (`crate::settings`). Linux shows General, Recording, Storage,
-//! Agents and About: no permissions to grant, no Hex, no video export, and no Paste shortcut.
+//! Agents and About: no permissions to grant, no Hex, and no Paste shortcut.
 
 use super::*;
 
@@ -242,7 +242,7 @@ impl SettingsWindow {
     fn content(&self, cx: &mut Context<Self>) -> Div {
         let body = match self.pane {
             Pane::General => self.general(cx),
-            Pane::Recording => self.recording_pane(),
+            Pane::Recording => self.recording_pane(cx),
             Pane::Storage => self.storage(cx),
             Pane::Agents => self.agents(cx),
             Pane::About | Pane::Permissions => self.about(cx),
@@ -408,8 +408,9 @@ impl SettingsWindow {
             ))
     }
 
-    fn recording_pane(&self) -> Div {
+    fn recording_pane(&self, cx: &mut Context<Self>) -> Div {
         let parakeet = &self.view.parakeet;
+        let export = self.view.video_export;
         div()
             .flex()
             .flex_col()
@@ -435,6 +436,19 @@ impl SettingsWindow {
                 )),
             )
             .child(caption(&parakeet.detail, !parakeet.ready))
+            .child(group().child(row(
+                "Video export",
+                switch("video-export", export, true).on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.act(Self::set_bool("videoExport", !export), window, cx);
+                    },
+                )),
+            )))
+            .child(caption(
+                "Adds Export Last Capture as Video… to the tray menu (saved to Videos/Scrawl). \
+                 scrawl export works without it.",
+                false,
+            ))
     }
 
     fn storage(&self, cx: &mut Context<Self>) -> Div {
