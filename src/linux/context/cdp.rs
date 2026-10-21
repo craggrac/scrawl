@@ -8,7 +8,7 @@
 //! and takes messages in and gives commands out, so it is tested without a browser; `Link` is
 //! the socket.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
@@ -44,6 +44,8 @@ const MAX_NETWORK: usize = 40;
 const MAX_ACTIVE: usize = 2;
 /// Requests remembered for their method and address until they finish.
 const MAX_OPEN_REQUESTS: usize = 1_024;
+/// Execution contexts remembered (a page, its frames and workers, extensions' worlds).
+const MAX_CONTEXTS: usize = 4_096;
 const TEXT_CHARS: usize = 300;
 const ERROR_CHARS: usize = 60;
 const SOURCE_CHARS: usize = 100;
@@ -364,7 +366,17 @@ impl Notes {
 pub fn is_local_page(url: &str) -> bool {
     let url = url.trim();
     if url.get(..7).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://")) {
-        return true;
+        // `file://` and `file:///path` (and `file://localhost/path`); a named host is a share.
+        let rest = &url[7..];
+        return rest.is_empty()
+            || rest.starts_with('/')
+            || rest.get(..10).is_some_and(|host| host.eq_ignore_ascii_case("localhost/"));
+    }
+    // A browser reads `\` like `/` and drops tabs and line breaks, a parser here doesn't: where
+    // the two could disagree about the host, the address isn't local.
+    let authority = url.split(['/', '?', '#']).nth(2).unwrap_or_default();
+    if authority.chars().any(|c| c == '\\' || c.is_whitespace() || c.is_control()) {
+        return false;
     }
     crate::routing::parse_url(url).is_some_and(|url| is_local_host(&url.host))
 }
@@ -373,16 +385,34 @@ fn is_local_host(host: &str) -> bool {
     host != "0.0.0.0" && crate::routing::is_loopback_host(host)
 }
 
-/// An `http(s)` address on a host that isn't local; other kinds (`blob:`, `webpack-internal:`,
-/// no address) don't say.
-fn is_foreign_address(url: &str) -> bool {
-    crate::routing::parse_url(url).is_some_and(|url| !is_local_host(&url.host))
+/// Schemes of dev tools whose code runs inside the page being developed.
+const DEV_SCHEMES: [&str; 2] = ["webpack-internal:", "webpack:"];
+
+fn starts_with_ci(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
-/// Whether the stack frame, or the log entry, comes from a script on another site (a CDN, or
-/// an embedded page whose messages arrive in the tab's own console).
-fn from_foreign_script(frame: &Value) -> bool {
-    frame["url"].as_str().is_some_and(is_foreign_address)
+/// Whether an origin or script address positively names the developer's own: a local page
+/// address (see `is_local_page`), `blob:` of one (the inner origin counts), or a dev tool's
+/// scheme. Anything else, unparseable or unknown (`about:`, `data:`, `javascript:`, extensions,
+/// an empty string) is not: the filter fails closed.
+fn is_local_attribution(url: &str) -> bool {
+    let url = url.trim();
+    if starts_with_ci(url, "blob:") {
+        let inner = url[5..].trim_start();
+        return !starts_with_ci(inner, "blob:") && is_local_page(inner);
+    }
+    is_local_page(url) || DEV_SCHEMES.iter().any(|scheme| starts_with_ci(url, scheme))
+}
+
+/// A script address that contradicts the page it ran in: none (inline and eval'd code have
+/// none) says nothing against it; one that is not positively local does.
+fn script_is_foreign(url: Option<&str>) -> bool {
+    url.filter(|url| !url.is_empty()).is_some_and(|url| !is_local_attribution(url))
+}
+
+fn is_extension(url: &str) -> bool {
+    starts_with_ci(url, "chrome-extension://")
 }
 
 /// Whether the event is one that would have been collected, to count it when it is withheld.
@@ -422,10 +452,30 @@ pub struct Browser {
     pid: i32,
     targets: HashMap<String, Target>,
     attached: HashMap<String, Attached>,
-    /// `(session, request id)` → `(method, address, made by another site's document)` of
-    /// requests not finished.
-    requests: HashMap<(String, String), (String, String, bool)>,
+    /// `(session, request id)` → the request, while not finished. Oldest-first eviction at
+    /// `MAX_OPEN_REQUESTS`, through `request_order`.
+    requests: HashMap<(String, String), Request>,
+    /// Keys in the order they were first seen (may hold finished ones; compacted).
+    request_order: VecDeque<(String, String)>,
+    /// `(session, execution context id)` → what the browser says it is. The origin is the
+    /// browser's own account of where the code runs; a script's address can be set by the
+    /// script (`//# sourceURL=`).
+    contexts: HashMap<(String, i64), ExecContext>,
+    context_order: VecDeque<(String, i64)>,
     next_id: u64,
+}
+
+struct Request {
+    method: String,
+    url: String,
+    /// Made by a document that is positively local.
+    local: bool,
+}
+
+struct ExecContext {
+    origin: String,
+    /// The frame this is the main world of.
+    frame: Option<String>,
 }
 
 fn text_of(value: &Value, key: &str) -> String {
@@ -480,8 +530,90 @@ impl Browser {
             targets: HashMap::new(),
             attached: HashMap::new(),
             requests: HashMap::new(),
+            request_order: VecDeque::new(),
+            contexts: HashMap::new(),
+            context_order: VecDeque::new(),
             next_id: 0,
         }
+    }
+
+    /// Drops what was learned in a session that ended.
+    fn forget(&mut self, session: &str) {
+        self.requests.retain(|(s, _), _| s != session);
+        self.request_order.retain(|(s, _)| s != session);
+        self.contexts.retain(|(s, _), _| s != session);
+        self.context_order.retain(|(s, _)| s != session);
+    }
+
+    fn note_request(&mut self, key: (String, String), request: Request) {
+        if self.requests.insert(key.clone(), request).is_some() {
+            return;
+        }
+        // Finished requests leave their key behind; sweep when the list is twice the limit.
+        if self.request_order.len() >= 2 * MAX_OPEN_REQUESTS {
+            let open = &self.requests;
+            self.request_order.retain(|key| open.contains_key(key));
+        }
+        self.request_order.push_back(key);
+        // Oldest first: a burst of requests costs the oldest ones, never all of them.
+        while self.requests.len() > MAX_OPEN_REQUESTS {
+            let Some(oldest) = self.request_order.pop_front() else { break };
+            self.requests.remove(&oldest);
+        }
+    }
+
+    fn runtime_context(&mut self, session: &str, method: &str, params: &Value) {
+        match method {
+            "Runtime.executionContextCreated" => {
+                let context = &params["context"];
+                let Some(id) = context["id"].as_i64() else { return };
+                let aux = &context["auxData"];
+                let frame = aux["frameId"]
+                    .as_str()
+                    .filter(|_| aux["isDefault"] == true)
+                    .map(str::to_owned);
+                let key = (session.to_owned(), id);
+                let known = ExecContext { origin: text_of(context, "origin"), frame };
+                if self.contexts.insert(key.clone(), known).is_none() {
+                    self.context_order.push_back(key);
+                    while self.contexts.len() > MAX_CONTEXTS {
+                        let Some(oldest) = self.context_order.pop_front() else { break };
+                        self.contexts.remove(&oldest);
+                    }
+                }
+            }
+            "Runtime.executionContextDestroyed" => {
+                if let Some(id) = params["executionContextId"].as_i64() {
+                    self.contexts.remove(&(session.to_owned(), id));
+                    self.context_order.retain(|key| key != &(session.to_owned(), id));
+                }
+            }
+            "Runtime.executionContextsCleared" => {
+                self.contexts.retain(|(s, _), _| s != session);
+                self.context_order.retain(|(s, _)| s != session);
+            }
+            _ => {}
+        }
+    }
+
+    /// The origin the browser reports for an execution context, if it knows it.
+    fn context_origin(&self, session: &str, id: Option<i64>) -> Option<&str> {
+        self.contexts.get(&(session.to_owned(), id?)).map(|context| context.origin.as_str())
+    }
+
+    /// The origin of a frame's main world, if one was reported.
+    fn frame_origin(&self, session: &str, frame: &str) -> Option<&str> {
+        self.contexts
+            .iter()
+            .find(|((s, _), context)| s == session && context.frame.as_deref() == Some(frame))
+            .map(|(_, context)| context.origin.as_str())
+    }
+
+    /// Whether console or exception text positively comes from the local page: the browser's
+    /// account of the execution context's origin must be local (primary), and the script's own
+    /// address, when it has one, must be too (secondary; a script can claim any address).
+    fn from_here(&self, session: &str, context: Option<i64>, script: Option<&str>) -> bool {
+        self.context_origin(session, context).is_some_and(is_local_attribution) && !script_is_foreign(script)
     }
 
     fn command(&mut self, method: &str, params: Value, session: Option<&str>) -> String {
@@ -527,6 +659,7 @@ impl Browser {
             .collect();
         for id in leaving {
             if let Some(Attached { session: Some(session), .. }) = self.attached.remove(&id) {
+                self.forget(&session);
                 commands.push(self.command("Target.detachFromTarget", json!({"sessionId": session}), None));
             }
         }
@@ -572,7 +705,9 @@ impl Browser {
             "Target.targetDestroyed" => {
                 let id = text_of(params, "targetId");
                 self.targets.remove(&id);
-                self.attached.remove(&id);
+                if let Some(Attached { session: Some(session), .. }) = self.attached.remove(&id) {
+                    self.forget(&session);
+                }
             }
             "Target.attachedToTarget" => {
                 let id = text_of(&params["targetInfo"], "targetId");
@@ -587,6 +722,7 @@ impl Browser {
             "Target.detachedFromTarget" => {
                 let session = text_of(params, "sessionId");
                 self.attached.retain(|_, attached| attached.session.as_deref() != Some(&session));
+                self.forget(&session);
             }
             _ => {
                 if let Some(session) = message["sessionId"].as_str()
@@ -596,6 +732,10 @@ impl Browser {
                         .find(|(_, a)| a.session.as_deref() == Some(session))
                         .map(|(id, a)| (id, a.since_ms))
                 {
+                    if method.starts_with("Runtime.executionContext") {
+                        self.runtime_context(session, method, params);
+                        return Vec::new();
+                    }
                     // Judged by the address the tab shows now.
                     let local = self.targets.get(id).is_some_and(|target| is_local_page(&target.url));
                     self.session_event(session, method, params, now_ms, since_ms, local, notes);
@@ -645,10 +785,11 @@ impl Browser {
                     _ => return,
                 };
                 let frame = params["stackTrace"]["callFrames"].get(0);
-                if frame.is_some_and(|f| f["url"].as_str().is_some_and(|u| u.starts_with("chrome-extension://"))) {
+                let script = frame.and_then(|f| f["url"].as_str());
+                if script.is_some_and(is_extension) {
                     return;
                 }
-                if frame.is_some_and(from_foreign_script) {
+                if !self.from_here(session, params["executionContextId"].as_i64(), script) {
                     notes.withhold();
                     return;
                 }
@@ -663,14 +804,14 @@ impl Browser {
             }
             "Runtime.exceptionThrown" => {
                 let details = &params["exceptionDetails"];
-                let Some(t) = notes.event_time(params["timestamp"].as_f64(), now_ms, since_ms) else {
-                    return;
-                };
                 let top = details["stackTrace"]["callFrames"].get(0).unwrap_or(details);
-                if from_foreign_script(top) {
+                if !self.from_here(session, details["executionContextId"].as_i64(), top["url"].as_str()) {
                     notes.withhold();
                     return;
                 }
+                let Some(t) = notes.event_time(params["timestamp"].as_f64(), now_ms, since_ms) else {
+                    return;
+                };
                 let exception = &details["exception"];
                 let mut text = remote_object_text(exception);
                 if text.is_empty() {
@@ -696,7 +837,11 @@ impl Browser {
                 {
                     return;
                 }
-                if from_foreign_script(entry) {
+                // A log entry names no execution context: it is kept only when its own address
+                // (or its top frame's) positively says local.
+                let at = entry["stackTrace"]["callFrames"].get(0).unwrap_or(entry);
+                let url = at["url"].as_str().filter(|url| !url.is_empty());
+                if !url.is_some_and(is_local_attribution) {
                     notes.withhold();
                     return;
                 }
@@ -709,32 +854,48 @@ impl Browser {
                 notes.console(t, "error", redact::text(entry["text"].as_str().unwrap_or_default(), TEXT_CHARS), at);
             }
             "Network.requestWillBeSent" => {
-                if self.requests.len() >= MAX_OPEN_REQUESTS {
-                    self.requests.clear();
-                }
                 let request = &params["request"];
-                self.requests.insert(
+                // The document that made the request must positively be local (a frame
+                // embedded in the local page is another site's); with none given, the frame's.
+                let document = params["documentURL"].as_str().filter(|url| !url.is_empty());
+                let local = match document {
+                    Some(document) => is_local_attribution(document),
+                    None => params["frameId"]
+                        .as_str()
+                        .and_then(|frame| self.frame_origin(session, frame))
+                        .is_some_and(is_local_attribution),
+                };
+                self.note_request(
                     (session.to_owned(), text_of(params, "requestId")),
-                    (
-                        text_of(request, "method"),
-                        text_of(request, "url"),
-                        // The document that made the request, when it is another site's (a
-                        // frame embedded in the local page).
-                        is_foreign_address(params["documentURL"].as_str().unwrap_or_default()),
-                    ),
+                    Request { method: text_of(request, "method"), url: text_of(request, "url"), local },
                 );
             }
             "Network.responseReceived" => {
                 let status = params["response"]["status"].as_u64().unwrap_or(0);
                 let key = (session.to_owned(), text_of(params, "requestId"));
-                let (method, mut url, foreign) = self.requests.get(&key).cloned().unwrap_or_default();
-                if foreign && status >= 400 {
-                    notes.withhold();
-                    return;
-                }
-                if url.is_empty() {
-                    url = text_of(&params["response"], "url");
-                }
+                let (method, url) = match self.requests.get(&key) {
+                    Some(request) if request.local => (request.method.clone(), request.url.clone()),
+                    Some(_) => {
+                        if status >= 400 {
+                            notes.withhold();
+                        }
+                        return;
+                    }
+                    // Not one seen being sent (evicted, or from before the attach): nothing is
+                    // known of who made it, so it is judged by what this event says: a local
+                    // address, from a frame known to be local.
+                    None => {
+                        let url = text_of(&params["response"], "url");
+                        let frame = params["frameId"].as_str().and_then(|frame| self.frame_origin(session, frame));
+                        if !(is_local_attribution(&url) && frame.is_some_and(is_local_attribution)) {
+                            if status >= 400 {
+                                notes.withhold();
+                            }
+                            return;
+                        }
+                        (String::new(), url)
+                    }
+                };
                 if status >= 400 && interesting(&url) {
                     let method = if method.is_empty() { "GET" } else { &method };
                     notes.network(now_ms, method, &url, Some(status as u16), None);
@@ -742,14 +903,21 @@ impl Browser {
             }
             "Network.loadingFailed" => {
                 let key = (session.to_owned(), text_of(params, "requestId"));
-                let Some((method, url, foreign)) = self.requests.remove(&key) else {
-                    return;
-                };
+                let known = self.requests.remove(&key);
                 // A navigation away or a cancelled fetch isn't a failure.
-                if params["canceled"] == true || !interesting(&url) {
+                if params["canceled"] == true {
                     return;
                 }
-                if foreign {
+                // The event names neither an address nor a frame: of a request not seen being
+                // sent there is nothing to judge by.
+                let Some(Request { method, url, local }) = known else {
+                    notes.withhold();
+                    return;
+                };
+                if !interesting(&url) {
+                    return;
+                }
+                if !local {
                     notes.withhold();
                     return;
                 }
@@ -839,10 +1007,12 @@ pub mod testing {
                         {"sessionId": "S1", "targetInfo": {"targetId": "P"}}})),
                     "Network.enable" => {
                         assert_eq!(command["sessionId"], "S1");
+                        send(json!({"method": "Runtime.executionContextCreated", "sessionId": "S1", "params": {"context":
+                            {"id": 7, "origin": "http://localhost:3000", "auxData": {"frameId": "F", "isDefault": true}}}}));
                         send(json!({"method": "Runtime.consoleAPICalled", "sessionId": "S1", "params": {
-                            "type": "error", "timestamp": epoch_ms + 5.0, "args": [{"type": "string", "value": "boom"}]}}));
+                            "type": "error", "timestamp": epoch_ms + 5.0, "executionContextId": 7, "args": [{"type": "string", "value": "boom"}]}}));
                         send(json!({"method": "Network.requestWillBeSent", "sessionId": "S1", "params":
-                            {"requestId": "r", "request": {"method": "POST", "url": "http://localhost:3000/api/x"}}}));
+                            {"requestId": "r", "documentURL": "http://localhost:3000/", "request": {"method": "POST", "url": "http://localhost:3000/api/x"}}}));
                         send(json!({"method": "Network.responseReceived", "sessionId": "S1", "params":
                             {"requestId": "r", "response": {"url": "http://localhost:3000/api/x", "status": 500}}}));
                     }
@@ -886,7 +1056,19 @@ mod tests {
             .collect();
         assert_eq!(methods, ["Runtime.enable", "Log.enable", "Network.enable"]);
         assert!(enable.iter().all(|c| c.contains("\"sessionId\":\"s1\"")));
+        // What `Runtime.enable` replays: the page's main world.
+        context(&mut browser, "s1", 1, "http://localhost:3000", "F1", true);
         browser
+    }
+
+    /// The browser reporting an execution context of `frame`.
+    fn context(browser: &mut Browser, session: &str, id: i64, origin: &str, frame: &str, default: bool) {
+        browser.handle(
+            &json!({"method": "Runtime.executionContextCreated", "sessionId": session, "params": {"context":
+                {"id": id, "origin": origin, "name": "", "auxData": {"frameId": frame, "isDefault": default}}}}),
+            120,
+            &mut notes(),
+        );
     }
 
     fn event(method: &str, params: Value) -> Value {
@@ -931,19 +1113,19 @@ mod tests {
         let mut browser = following(&mut notes);
         let stamp = START_EPOCH + 7_000.0;
         let frame = json!({"url": "http://localhost:3000/src/app.js?v=3", "lineNumber": 11, "columnNumber": 4});
-        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": stamp,
+        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": stamp, "executionContextId": 1,
             "args": [{"type": "string", "value": "Failed to load"}, {"type": "object", "description": "Error: boom\n    at f (app.js:1:1)"}],
             "stackTrace": {"callFrames": [frame]}})), 7_050, &mut notes);
         browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "log", "timestamp": stamp, "args": []})), 7_050, &mut notes);
         for _ in 0..2 {
-            browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "warning", "timestamp": stamp + 100.0,
+            browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "warning", "timestamp": stamp + 100.0, "executionContextId": 1,
                 "args": [{"type": "string", "value": "deprecated"}]})), 7_200, &mut notes);
         }
         browser.handle(&event("Runtime.exceptionThrown", json!({"timestamp": stamp + 500.0, "exceptionDetails": {
-            "text": "Uncaught", "exception": {"type": "object", "description": "TypeError: x is not a function\n    at go (app.js:5:3)"},
+            "text": "Uncaught", "executionContextId": 1, "exception": {"type": "object", "description": "TypeError: x is not a function\n    at go (app.js:5:3)"},
             "stackTrace": {"callFrames": [frame]}}})), 7_600, &mut notes);
         browser.handle(&event("Log.entryAdded", json!({"entry": {"source": "security", "level": "error",
-            "text": "Refused to load the script", "timestamp": stamp + 900.0}})), 7_900, &mut notes);
+            "text": "Refused to load the script", "url": "http://localhost:3000/", "timestamp": stamp + 900.0}})), 7_900, &mut notes);
         browser.handle(&event("Log.entryAdded", json!({"entry": {"source": "network", "level": "error", "text": "Failed to load resource", "timestamp": stamp}})), 7_000, &mut notes);
         browser.handle(&event("Log.entryAdded", json!({"entry": {"source": "other", "level": "info", "text": "hello", "timestamp": stamp}})), 7_000, &mut notes);
         let seen: Vec<(u64, &str, &str, Option<&str>, u32)> = notes
@@ -968,9 +1150,9 @@ mod tests {
         let mut notes = notes();
         let mut browser = following(&mut notes);
         browser.handle(&event("Runtime.exceptionThrown", json!({"timestamp": START_EPOCH + 500.0, "exceptionDetails": {
-            "text": "Uncaught", "exception": {"type": "string", "value": "nope"}, "url": "http://localhost:3000/a.js",
+            "text": "Uncaught", "executionContextId": 1, "exception": {"type": "string", "value": "nope"}, "url": "http://localhost:3000/a.js",
             "lineNumber": 0, "columnNumber": 9}})), 600, &mut notes);
-        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": START_EPOCH + 600.0,
+        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": START_EPOCH + 600.0, "executionContextId": 1,
             "args": [{"type": "string", "value": "ext"}], "stackTrace": {"callFrames": [
                 {"url": "chrome-extension://abc/content.js", "lineNumber": 1, "columnNumber": 1}]}})), 700, &mut notes);
         assert_eq!(notes.context.console.len(), 1);
@@ -983,16 +1165,17 @@ mod tests {
         let mut notes = notes();
         let mut browser = following(&mut notes);
         // The first tab followed counts from the start of the capture, not before it.
-        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": START_EPOCH - 5_000.0,
+        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": START_EPOCH - 5_000.0, "executionContextId": 1,
             "args": [{"type": "string", "value": "old"}]})), 120, &mut notes);
         assert!(notes.context.console.is_empty());
         // A tab switched to later keeps only what happened from just before its turn.
         browser.focus(&Focus { pid: 77, title: "Mail - Helium".into() }, 9_000, &mut notes);
         browser.handle(&json!({"method": "Target.attachedToTarget", "params":
             {"sessionId": "s2", "targetInfo": {"targetId": "page-2"}}}), 9_010, &mut notes);
+        context(&mut browser, "s2", 1, "http://localhost:4000", "F2", true);
         for (stamp, text) in [(2_000.0, "background"), (8_900.0, "just before"), (9_050.0, "now")] {
             browser.handle(&json!({"method": "Runtime.consoleAPICalled", "sessionId": "s2", "params":
-                {"type": "error", "timestamp": START_EPOCH + stamp, "args": [{"type": "string", "value": text}]}}),
+                {"type": "error", "executionContextId": 1, "timestamp": START_EPOCH + stamp, "args": [{"type": "string", "value": text}]}}),
                 9_100, &mut notes);
         }
         let texts: Vec<&str> = notes.context.console.iter().map(|e| e.text.as_str()).collect();
@@ -1004,7 +1187,7 @@ mod tests {
         let mut notes = notes();
         let mut browser = following(&mut notes);
         let request = |id: &str, method: &str, url: &str| event("Network.requestWillBeSent",
-            json!({"requestId": id, "request": {"method": method, "url": url}}));
+            json!({"requestId": id, "documentURL": "http://localhost:3000/dash", "request": {"method": method, "url": url}}));
         browser.handle(&request("1", "POST", "http://localhost:3000/api/x?api_key=zzz"), 8_000, &mut notes);
         browser.handle(&event("Network.responseReceived", json!({"requestId": "1", "type": "Fetch",
             "response": {"url": "http://localhost:3000/api/x?api_key=zzz", "status": 500}})), 9_000, &mut notes);
@@ -1114,7 +1297,7 @@ mod tests {
     fn a_local_tab_that_navigates_to_another_site_stops_being_read() {
         let mut notes = notes();
         let mut browser = following(&mut notes);
-        let error = |text: &str| event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": START_EPOCH + 2_000.0,
+        let error = |text: &str| event("Runtime.consoleAPICalled", json!({"type": "error", "executionContextId": 1, "timestamp": START_EPOCH + 2_000.0,
             "args": [{"type": "string", "value": text}]}));
         browser.handle(&error("local one"), 2_100, &mut notes);
         browser.handle(&json!({"method": "Target.targetInfoChanged", "params": {"targetInfo":
@@ -1136,10 +1319,10 @@ mod tests {
         let mut browser = following(&mut notes);
         let stamp = START_EPOCH + 2_000.0;
         let frame = |url: &str| json!({"callFrames": [{"url": url, "lineNumber": 0, "columnNumber": 0}]});
-        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": stamp,
+        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": stamp, "executionContextId": 1,
             "args": [{"type": "string", "value": "from a cdn"}], "stackTrace": frame("https://cdn.evil.test/x.js")})), 2_100, &mut notes);
         browser.handle(&event("Runtime.exceptionThrown", json!({"timestamp": stamp, "exceptionDetails": {
-            "text": "Uncaught", "exception": {"type": "string", "value": "from an iframe"},
+            "text": "Uncaught", "executionContextId": 1, "exception": {"type": "string", "value": "from an iframe"},
             "stackTrace": frame("https://ads.evil.test/frame.js")}})), 2_100, &mut notes);
         browser.handle(&event("Log.entryAdded", json!({"entry": {"source": "security", "level": "error",
             "text": "from an iframe", "url": "https://ads.evil.test/", "timestamp": stamp}})), 2_100, &mut notes);
@@ -1153,11 +1336,200 @@ mod tests {
         assert!(notes.context.console.is_empty() && notes.context.network.is_empty(), "{:?}", notes.context);
         assert_eq!(notes.context.withheld, 5);
         // Scripts of the page itself, and ones with no address, are kept.
-        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": stamp,
+        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": stamp, "executionContextId": 1,
             "args": [{"type": "string", "value": "own"}], "stackTrace": frame("http://localhost:3000/a.js")})), 2_100, &mut notes);
-        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": stamp,
+        browser.handle(&event("Runtime.consoleAPICalled", json!({"type": "error", "timestamp": stamp, "executionContextId": 1,
             "args": [{"type": "string", "value": "eval"}], "stackTrace": frame("webpack-internal:///./src/a.js")})), 2_100, &mut notes);
         assert_eq!(notes.context.console.len(), 2);
+    }
+
+
+    /// Console errors, one per `(context id, script address)`, `None` leaving the field out.
+    fn errors(browser: &mut Browser, notes: &mut Notes, cases: &[(Option<i64>, Option<&str>)]) {
+        for (i, (context, script)) in cases.iter().enumerate() {
+            let mut params = json!({"type": "error", "timestamp": START_EPOCH + 3_000.0,
+                "args": [{"type": "string", "value": format!("case {i}")}]});
+            if let Some(context) = context {
+                params["executionContextId"] = json!(context);
+            }
+            if let Some(script) = script {
+                params["stackTrace"] = json!({"callFrames": [{"url": script, "lineNumber": 0, "columnNumber": 0}]});
+            }
+            browser.handle(&event("Runtime.consoleAPICalled", params), 3_100, notes);
+        }
+    }
+
+    #[test]
+    fn a_message_is_kept_only_when_its_origin_and_script_positively_say_local() {
+        let mut notes = notes();
+        let mut browser = following(&mut notes);
+        // The main world is local (1); an embedded frame (2), a sandboxed one (3), about:blank (4)
+        // and an extension's world (5) are not.
+        context(&mut browser, "s1", 2, "https://ads.evil.test", "F2", true);
+        context(&mut browser, "s1", 3, "null", "F3", true);
+        context(&mut browser, "s1", 4, "://", "F4", true);
+        context(&mut browser, "s1", 6, "file://", "F6", true);
+        let withheld: Vec<(Option<i64>, Option<&str>)> = vec![
+            // Unknown or missing contexts, with nothing else to go by.
+            (None, None), (Some(99), None), (None, Some("http://localhost:3000/a.js")),
+            // Contexts that are not local, even when the script claims to be (`//# sourceURL=`).
+            (Some(2), None), (Some(2), Some("http://localhost:3000/a.js")), (Some(3), None), (Some(4), None),
+            // A local context, but a script that is not positively local: another site, and
+            // every address that doesn't parse or isn't a web address.
+            (Some(1), Some("https://cdn.evil.test/x.js")), (Some(1), Some("garbage")), (Some(1), Some("about:blank")),
+            (Some(1), Some("data:text/javascript,alert(1)")), (Some(1), Some("blob:null/1234")),
+            (Some(1), Some("blob:https://evil.test/1234")), (Some(1), Some("javascript:alert(1)")),
+            (Some(1), Some("moz-extension://abc/x.js")), (Some(1), Some("http://localhost\\@evil.test/x.js")),
+            (Some(1), Some("http://evil.test\\@localhost/x.js")), (Some(1), Some("http://[::1/x.js")),
+            (Some(1), Some("//evil.test/x.js")), (Some(1), Some("localhost:3000/x.js")),
+        ];
+        errors(&mut browser, &mut notes, &withheld);
+        assert!(notes.context.console.is_empty(), "{:?}", notes.context.console);
+        assert_eq!(notes.context.withheld as usize, withheld.len());
+        let kept = [
+            (Some(1), None), (Some(1), Some("")), (Some(1), Some("http://127.0.0.1:5173/@fs/x.ts")),
+            (Some(1), Some("blob:http://localhost:3000/5f1c")), (Some(1), Some("webpack-internal:///./src/a.js")),
+            (Some(1), Some("file:///home/u/a.js")), (Some(6), None),
+        ];
+        errors(&mut browser, &mut notes, &kept);
+        assert_eq!(notes.context.console.len(), kept.len(), "{:?}", notes.context.console);
+        // A context that is gone is unknown again.
+        browser.handle(&event("Runtime.executionContextDestroyed", json!({"executionContextId": 1})), 3_200, &mut notes);
+        errors(&mut browser, &mut notes, &[(Some(1), None)]);
+        assert_eq!(notes.context.withheld as usize, withheld.len() + 1);
+        // And an exception and a log entry are judged the same way.
+        let before = notes.context.withheld;
+        browser.handle(&event("Runtime.exceptionThrown", json!({"timestamp": START_EPOCH + 3_000.0, "exceptionDetails": {
+            "text": "Uncaught", "executionContextId": 2, "exception": {"type": "string", "value": "x"}}})), 3_300, &mut notes);
+        browser.handle(&event("Runtime.exceptionThrown", json!({"timestamp": START_EPOCH + 3_000.0, "exceptionDetails": {
+            "text": "Uncaught", "exception": {"type": "string", "value": "x"}}})), 3_300, &mut notes);
+        for entry in [json!({}), json!({"url": ""}), json!({"url": "about:blank"}), json!({"url": "https://evil.test/"})] {
+            let mut entry = entry;
+            entry["source"] = json!("security");
+            entry["level"] = json!("error");
+            entry["text"] = json!("x");
+            entry["timestamp"] = json!(START_EPOCH + 3_000.0);
+            browser.handle(&event("Log.entryAdded", json!({"entry": entry})), 3_300, &mut notes);
+        }
+        assert_eq!(notes.context.withheld, before + 6);
+    }
+
+    #[test]
+    fn attribution_must_parse_as_local_and_nothing_else_passes() {
+        for url in [
+            "http://localhost:3000", "http://localhost:3000/a.js", "file://", "file:///a", "BLOB:http://127.0.0.1:1/x",
+            "webpack-internal:///x", "webpack://app/x.js", "http://[::1]:5173/",
+        ] {
+            assert!(is_local_attribution(url), "{url}");
+        }
+        for url in [
+            "", " ", "null", "://", "about:blank", "data:,x", "javascript:1", "blob:", "blob:null/x", "blob:blob:http://localhost/x",
+            "chrome-extension://abc/", "chrome://x", "ftp://localhost/", "ws://localhost/", "filesystem:http://localhost/x",
+            "http://localhost\\.evil.test/", "http://evil.test\\@localhost/", "http://local\thost/", "http://localhost%2f@evil.test/",
+            "http://evil.test#@localhost/", "http://0.0.0.0/", "file://share/x", "http:///", "http://",
+        ] {
+            assert!(!is_local_attribution(url), "{url:?}");
+        }
+    }
+
+    /// A request seen being sent from a local page, as session `s1`.
+    fn local_request(browser: &mut Browser, notes: &mut Notes, id: &str, url: &str) {
+        browser.handle(&event("Network.requestWillBeSent", json!({"requestId": id, "documentURL": "http://localhost:3000/dash",
+            "request": {"method": "GET", "url": url}})), 4_000, notes);
+    }
+
+    #[test]
+    fn a_response_or_failure_of_an_unknown_request_is_judged_by_what_the_event_says() {
+        let mut notes = notes();
+        let mut browser = following(&mut notes);
+        context(&mut browser, "s1", 2, "https://ads.evil.test", "F2", true);
+        let response = |id: &str, url: &str, frame: Option<&str>| {
+            let mut params = json!({"requestId": id, "response": {"url": url, "status": 500}});
+            if let Some(frame) = frame {
+                params["frameId"] = json!(frame);
+            }
+            event("Network.responseReceived", params)
+        };
+        // Local address from the local frame: kept.
+        browser.handle(&response("a", "http://localhost:3000/api/a", Some("F1")), 4_100, &mut notes);
+        assert_eq!(notes.context.network.len(), 1);
+        assert_eq!(notes.context.withheld, 0);
+        // Everything else is withheld: another site's address, a local address from another
+        // site's frame, from an unknown frame, or from none, and an unparseable one.
+        for (url, frame) in [
+            ("https://evil.test/ignore-all-rules", Some("F1")), ("http://localhost:3000/b", Some("F2")),
+            ("http://localhost:3000/c", Some("nope")), ("http://localhost:3000/d", None),
+            ("http://evil.test\\@localhost/e", Some("F1")), ("about:blank", Some("F1")), ("", Some("F1")),
+        ] {
+            browser.handle(&response("x", url, frame), 4_200, &mut notes);
+        }
+        assert_eq!(notes.context.network.len(), 1, "{:?}", notes.context.network);
+        assert_eq!(notes.context.withheld, 7);
+        // A failure carries neither address nor frame: unknown ones are withheld, cancelled
+        // ones are not failures.
+        browser.handle(&event("Network.loadingFailed", json!({"requestId": "gone", "errorText": "net::ERR_FAILED"})), 4_300, &mut notes);
+        browser.handle(&event("Network.loadingFailed", json!({"requestId": "gone2", "canceled": true})), 4_300, &mut notes);
+        assert!(notes.context.network.len() == 1);
+        assert_eq!(notes.context.withheld, 8);
+        // A request seen being sent without a document is judged by its frame.
+        for (id, frame, kept) in [("f1", "F1", true), ("f2", "F2", false), ("f3", "nope", false)] {
+            browser.handle(&event("Network.requestWillBeSent", json!({"requestId": id, "frameId": frame,
+                "request": {"method": "GET", "url": "http://localhost:3000/z"}})), 4_400, &mut notes);
+            browser.handle(&response(id, "http://localhost:3000/z", None), 4_500, &mut notes);
+            assert_eq!(notes.context.network.len(), 1 + usize::from(kept), "{id}");
+            notes.context.network.truncate(1);
+        }
+        // A document that is not positively local withholds, whatever the frame.
+        for document in ["about:blank", "data:text/html,x", "https://evil.test/", "blob:null/1", ""] {
+            let mut params = json!({"requestId": "d", "frameId": "F1", "request": {"method": "GET", "url": "http://localhost:3000/y"}});
+            if !document.is_empty() {
+                params["documentURL"] = json!(document);
+            }
+            let before = notes.context.withheld;
+            browser.handle(&event("Network.requestWillBeSent", params), 4_600, &mut notes);
+            browser.handle(&response("d", "http://localhost:3000/y", Some("F1")), 4_700, &mut notes);
+            let kept = document.is_empty();
+            assert_eq!(notes.context.withheld, before + u32::from(!kept), "{document:?}");
+            notes.context.network.truncate(1);
+        }
+    }
+
+    #[test]
+    fn open_requests_are_evicted_oldest_first_not_all_at_once() {
+        let mut notes = notes();
+        let mut browser = following(&mut notes);
+        for i in 0..MAX_OPEN_REQUESTS + 10 {
+            local_request(&mut browser, &mut notes, &format!("r{i}"), "http://localhost:3000/x");
+        }
+        assert_eq!(browser.requests.len(), MAX_OPEN_REQUESTS);
+        // The oldest are gone (their failure can't be placed: withheld); the rest are known.
+        browser.handle(&event("Network.loadingFailed", json!({"requestId": "r0", "errorText": "net::ERR_FAILED"})), 5_000, &mut notes);
+        assert_eq!((notes.context.network.len(), notes.context.withheld), (0, 1));
+        let last = format!("r{}", MAX_OPEN_REQUESTS + 9);
+        browser.handle(&event("Network.loadingFailed", json!({"requestId": "r10", "errorText": "net::ERR_FAILED"})), 5_000, &mut notes);
+        browser.handle(&event("Network.loadingFailed", json!({"requestId": last, "errorText": "net::ERR_FAILED"})), 5_000, &mut notes);
+        assert_eq!((notes.context.network.len(), notes.context.withheld), (1, 1));
+        // Requests that finish normally don't pile up in the order list either.
+        for i in 0..5 * MAX_OPEN_REQUESTS {
+            local_request(&mut browser, &mut notes, &format!("f{i}"), "http://localhost:3000/x");
+            browser.handle(&event("Network.loadingFinished", json!({"requestId": format!("f{i}")})), 5_100, &mut notes);
+        }
+        assert!(browser.request_order.len() <= 2 * MAX_OPEN_REQUESTS);
+        // A request sent again (a redirect) keeps one place.
+        let before = browser.requests.len();
+        local_request(&mut browser, &mut notes, "r11", "http://localhost:3000/again");
+        assert_eq!(browser.requests.len(), before);
+    }
+
+    #[test]
+    fn what_was_learned_in_a_session_goes_with_it() {
+        let mut notes = notes();
+        let mut browser = following(&mut notes);
+        local_request(&mut browser, &mut notes, "a", "http://localhost:3000/x");
+        assert!(!browser.contexts.is_empty() && !browser.requests.is_empty());
+        browser.handle(&json!({"method": "Target.detachedFromTarget", "params": {"sessionId": "s1"}}), 6_000, &mut notes);
+        assert!(browser.contexts.is_empty() && browser.requests.is_empty());
+        assert!(browser.request_order.is_empty() && browser.context_order.is_empty());
     }
 
     #[test]
