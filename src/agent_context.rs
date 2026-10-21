@@ -792,6 +792,7 @@ mod tests {
             cursor: Vec::new(),
             autocrop: None,
             destination: None,
+            dev_context: Default::default(),
         }
     }
 

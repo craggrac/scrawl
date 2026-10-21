@@ -79,6 +79,8 @@ pub struct ActivityLog {
     /// When the finish sequence began and how long stopping capture streams took.
     pub stop_started: Option<Instant>,
     pub stop_ms: Option<u64>,
+    /// Linux: the browser tab's errors and the repositories (`crate::dev_context`).
+    pub dev_context: crate::dev_context::DevContext,
 }
 
 impl ActivityLog {

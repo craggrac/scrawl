@@ -8,6 +8,7 @@ mod capture;
 #[cfg(any(target_os = "macos", test))]
 mod command_line;
 mod delivery;
+mod dev_context;
 mod export;
 mod handoff;
 mod helper;
@@ -1033,6 +1034,7 @@ pub fn build_bundle_from_parts(
             cursor: extras.activity.cursor,
             autocrop: prep.autocrop,
             destination: None,
+            dev_context: extras.activity.dev_context,
         };
         let summary = summary_markdown(&bundle, bundle_dir);
         std::fs::create_dir_all(bundle_dir.join("frames"))
@@ -1184,6 +1186,7 @@ pub fn build_bundle_from_parts(
         cursor: extras.activity.cursor,
         autocrop: cropped.as_ref().map(|(info, _)| info.clone()),
         destination: None,
+        dev_context: extras.activity.dev_context,
     };
 
     let (full_sheet, contact_sheet) = std::thread::scope(|scope| {
@@ -1729,6 +1732,7 @@ fn main() -> Result<()> {
                         let mut iter_activity = windows::ActivityLog {
                             windows: old.windows.clone(),
                             cursor: old.cursor.clone(),
+                            dev_context: old.dev_context.clone(),
                             ..Default::default()
                         };
                         let iter_wav = wav_bytes.clone();
@@ -1855,6 +1859,7 @@ fn main() -> Result<()> {
                         activity: windows::ActivityLog {
                             windows: old.windows,
                             cursor: old.cursor,
+                            dev_context: old.dev_context,
                             ..Default::default()
                         },
                         full_frames,

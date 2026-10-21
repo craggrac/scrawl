@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::dev_context::DevContext;
 pub use crate::windows::{CursorSample, WindowSnapshot};
 
 /// Coordinates in `Stroke::pts` are scaled to `0..=10_000` (1/10000 of target width/height).
@@ -107,6 +108,10 @@ pub struct ScrawlBundle {
     /// recovers to the same place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<Destination>,
+    /// Linux: the focused browser tab's console errors, failed requests and page changes, and
+    /// the repositories the terminal or dev server was in (`dev_context`).
+    #[serde(default, skip_serializing_if = "DevContext::is_empty")]
+    pub dev_context: DevContext,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
