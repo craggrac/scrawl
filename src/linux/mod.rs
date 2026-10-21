@@ -10,6 +10,7 @@ pub mod input;
 pub mod media;
 pub mod parakeet;
 pub mod record;
+pub mod redact;
 pub mod replay;
 pub mod toggle;
 

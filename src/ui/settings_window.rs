@@ -316,7 +316,26 @@ impl SettingsWindow {
         for shortcut in &self.view.shortcuts {
             pane = pane.child(self.recorder(shortcut, cx));
         }
-        pane
+        let hidden = &self.view.redact_apps;
+        pane.child(group().child(row(
+            "Blurred windows",
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(14.0))
+                .text_color(rgb(MUTED_COLOR))
+                .child(if hidden.is_empty() {
+                    "None".to_owned()
+                } else {
+                    hidden.join(", ")
+                }),
+        )))
+        .child(caption(
+            "Windows of these apps are blurred in recordings, keyframes and the summary. Edit \
+             redactApps in ~/.config/scrawl/config.json (a class like \"zapfast\", or \
+             \"title:*bank*\" for a title; [] turns it off).",
+            false,
+        ))
     }
 
     /// The keycaps of one shortcut; a click listens for a new one.

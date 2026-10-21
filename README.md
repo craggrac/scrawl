@@ -76,7 +76,7 @@ It listens on `$XDG_RUNTIME_DIR/scrawl/ctl.sock` (owner-only); `toggle`, `stop`,
   result. Finish a recording with the shortcut, `scrawl toggle` or the tray.
 - **Settings.** The tray's Settings…, `settings` on the socket and Super+, in Scrawl's windows open
   a window with General (launch at login, which writes `~/.config/autostart/scrawl.desktop` to run
-  `scrawl app`, and the Record shortcut), Recording (whether Parakeet is ready), Storage (the size of
+  `scrawl app`, the Record shortcut, and which windows are blurred, [read only](#hiding-windows)), Recording (whether Parakeet is ready), Storage (the size of
   the captures folder; nothing deletes old captures on Linux, so there is no retention setting),
   Agents (the skill command) and About. The Mac-only settings (permissions, OpenCode, the Paste
   shortcut, the transcriber choice, video export) aren't there. While it listens for a new Record
@@ -199,6 +199,54 @@ This needs read access to `/dev/input/event*`, which on most distributions means
 `input` group (`sudo usermod -aG input $USER`, then log in again). Without it recording still
 works, just without these events. Touchpad taps and two-finger scrolling are not seen (libinput
 synthesizes them above evdev); physical buttons and mouse wheels are.
+
+### Hiding windows
+
+Linux only. Windows whose class matches `redactApps` in `~/.config/scrawl/config.json` are blurred in
+the capture, so a password manager open on the side never reaches the agent or the clipboard:
+
+```json
+{ "redactApps": ["keepassxc", "bitwarden", "zapfast", "title:*Bank*"] }
+```
+
+- **Patterns.** Each entry is a case-insensitive part of the window class (`hyprctl clients` shows it):
+  `"zapfast"` matches `zapfast`. With `*` or `?` it is a glob over the whole class (`"org.gnome.*"`).
+  `title:` in front matches the window title instead (`"title:*bank*"`), which is how to hide a site in
+  a browser; the whole browser window is blurred. The list replaces the default, `[]` turns the blurring
+  off, and without the key the default is the password managers: `keepassxc`, `bitwarden`, `1password`,
+  `proton pass`, `proton-pass`. Those never belong in a recording an agent reads, while a chat or a
+  bank may be exactly what is being recorded (a bug in that app), so those are for you to add
+  (`"whatsapp"`). Settings › General shows the list that is in effect; it is edited in the file.
+- **What is blurred.** At finish, before keyframes are decoded, summaries written or anything copied,
+  the matched windows are pixelated and darkened in `recording.mp4`: blocks of 1/45 of the screen
+  height, which can't be read back the way a gaussian blur can. The keyframes (`frames/`,
+  `frames-full/`), both contact sheets and `scrawl export` are made from that video, so they carry it.
+  In `scrawl.json` the title of a matched window in the window log becomes `(redacted)` (the app name
+  stays), and so does the target's title; `summary.md` is built from that.
+- **Where and when.** The window log (Hyprland's clients, a snapshot every second or when focus moves) says
+  where each window was. Between two snapshots a window may have moved, opened or closed, so each
+  interval covers the windows of both snapshots (a moved one as a box over its path), plus 0.3 s on each
+  side for the video and the log not agreeing to the frame. Parts off the screen are cut off. A window
+  of the special workspace (a scratchpad) counts as on screen while it is shown, and so does a pinned
+  one. Hyprland slides a workspace in and out, and the log does not know where a window is then, so
+  when a matched window appears or disappears its whole row and column are filled black from 0.15 s
+  before to 0.7 s after the snapshot that noticed it (solid, because they are big and short, and a
+  pixelated copy of them costs several times the encoding).
+- **Cost.** Nothing is read or rewritten when no matched window was on screen. Otherwise the video is
+  cut at its keyframes, only the pieces that contain a blur are re-encoded (`libx264` `ultrafast` at High profile like the original, every
+  frame keeping its time) and the rest is copied, then they are joined again; the audio of a recording
+  that has some is copied. It runs in the finish, next to the transcription, before the keyframes are
+  decoded, and shows as `redact …ms` in `finish timings`. A window there for the whole recording
+  re-encodes all of it (about 40 CPU-seconds per 15 s of 1080p; a window shown for a few seconds,
+  about 15 to 25, because pieces start at keyframes).
+- **Fails closed.** The pieces are written under `$XDG_RUNTIME_DIR` (memory), and the recording is
+  replaced by the finished file. If the rewrite fails, `recording.mp4` is deleted rather than kept
+  unblurred (the log says so).
+- **What it does not do.** Only whole-screen captures are redacted (the window log is only taken for
+  them); a window or region capture isn't, and neither is the narration. Anything is recorded
+  unblurred by `wf-recorder` until the capture finishes, so a capture that is cancelled or crashes
+  leaves its `recording.mp4` as it was. The browser context (`devContext`) is not filtered by these
+  patterns. macOS captures are untouched.
 
 ### Browser and project context
 

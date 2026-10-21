@@ -640,6 +640,8 @@ pub struct StageTimings {
     pub audio_ms: Option<u64>,
     pub candidates_ms: Option<u64>,
     pub transcribe_ms: Option<u64>,
+    /// Linux: hiding the windows `redactApps` names in the recording, when any were on screen.
+    pub redact_ms: Option<u64>,
 }
 
 /// Pre-rendered keyframe visuals and encoded PNGs computed while transcription is running.
@@ -839,6 +841,20 @@ pub fn finalize_capture_bundle(
         duration_ms,
         video_offset_ms,
     } = recording;
+    // Linux: the windows `redactApps` names lose their titles here and are blurred in the video
+    // below, before anything is decoded from it.
+    #[cfg(target_os = "linux")]
+    let (target, activity, redaction) = {
+        let (mut target, mut activity) = (target, activity);
+        let redaction = crate::linux::redact::Redaction::prepare(
+            &mut activity.windows,
+            &mut target,
+            video_offset_ms,
+        );
+        (target, activity, redaction)
+    };
+    #[cfg(target_os = "linux")]
+    let mut redact_ms = None;
     if let Some(ref audio) = recorded_audio {
         let wav_path = bundle_dir.join("audio.wav");
         let _ = std::fs::create_dir_all(bundle_dir);
@@ -858,6 +874,10 @@ pub fn finalize_capture_bundle(
             );
             (tr, t0.elapsed().as_millis() as u64)
         });
+        #[cfg(target_os = "linux")]
+        {
+            redact_ms = redaction.apply(video_path.as_deref());
+        }
         // Linux stops its recorder without decoding the candidate frames; they are decoded here,
         // while the narration is transcribed.
         #[cfg(target_os = "linux")]
@@ -937,6 +957,8 @@ pub fn finalize_capture_bundle(
                 started_at: Some(started_at),
                 stop_ms,
                 transcribe_ms: Some(transcribe_ms),
+                #[cfg(target_os = "linux")]
+                redact_ms,
                 ..StageTimings::default()
             },
             ..SourceExtras::default()
@@ -1093,6 +1115,9 @@ pub fn build_bundle_from_parts(
         }
         if let Some(ms) = extras.timings.transcribe_ms {
             parts.push(format!("transcribe {ms}ms"));
+        }
+        if let Some(ms) = extras.timings.redact_ms {
+            parts.push(format!("redact {ms}ms"));
         }
         parts.extend([
             format!("select {select_ms}ms"),
@@ -1254,6 +1279,9 @@ pub fn build_bundle_from_parts(
     }
     if let Some(ms) = extras.timings.transcribe_ms {
         parts.push(format!("transcribe {ms}ms"));
+    }
+    if let Some(ms) = extras.timings.redact_ms {
+        parts.push(format!("redact {ms}ms"));
     }
     parts.extend([
         format!("select {select_ms}ms"),

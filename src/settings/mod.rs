@@ -552,6 +552,9 @@ pub struct View {
     /// The Linux replay buffer (`replayBuffer`).
     #[cfg(target_os = "linux")]
     pub replay_buffer: bool,
+    /// Linux: the window patterns blurred out of captures (`redactApps`, or the defaults).
+    #[cfg(target_os = "linux")]
+    pub redact_apps: Vec<String>,
     #[cfg(target_os = "macos")]
     pub retention: RetentionView,
     /// How much the captures folder takes, once measured.
@@ -1247,6 +1250,8 @@ impl Panel {
             dev_context: config.dev_context.unwrap_or(false),
             #[cfg(target_os = "linux")]
             replay_buffer: config.replay_buffer.unwrap_or(false),
+            #[cfg(target_os = "linux")]
+            redact_apps: crate::linux::redact::apps_or_default(config.redact_apps.clone()),
             #[cfg(target_os = "macos")]
             retention: RetentionView {
                 preset: policy.preset().map(preset_id),
@@ -1984,6 +1989,19 @@ mod tests {
         );
         assert!(panel.view(&host).dev_context);
         assert_eq!(read_json(&host.path)["devContext"], true);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_blurred_windows_are_the_configured_list_or_the_password_managers() {
+        let dir = TempDir::new("redact");
+        let host = fake(&dir);
+        let panel = Panel::default();
+        assert!(panel.view(&host).redact_apps.iter().any(|app| app == "keepassxc"));
+        std::fs::write(&host.path, r#"{"redactApps": ["zapfast", "title:*bank*"]}"#).unwrap();
+        assert_eq!(panel.view(&host).redact_apps, ["zapfast", "title:*bank*"]);
+        std::fs::write(&host.path, r#"{"redactApps": []}"#).unwrap();
+        assert!(panel.view(&host).redact_apps.is_empty());
     }
 
     #[test]

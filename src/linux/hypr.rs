@@ -60,6 +60,9 @@ pub struct Monitor {
     pub transform: i32,
     pub focused: bool,
     pub active_workspace: WorkspaceRef,
+    /// The special workspace (scratchpad) shown over the active one; id 0 when none is.
+    #[serde(default)]
+    pub special_workspace: Option<WorkspaceRef>,
     /// Space the bars keep, logical points: left, top, right, bottom.
     #[serde(default)]
     pub reserved: [f64; 4],
@@ -79,6 +82,9 @@ pub struct Client {
     pub mapped: bool,
     pub hidden: bool,
     pub floating: bool,
+    /// Shown on every workspace of its monitor.
+    #[serde(default)]
+    pub pinned: bool,
     /// 0 is the window focused last.
     #[serde(rename = "focusHistoryID")]
     pub focus_history_id: i32,
@@ -473,14 +479,24 @@ pub fn monitor_name(id: u32) -> Option<String> {
         .map(|m| m.name)
 }
 
-/// The windows on `monitor`'s active workspace, front to back (floating above tiled, then by
-/// focus), with bounds in points from the monitor's top-left.
+/// The windows on `monitor` front to back: those of the special workspace shown over it (a
+/// scratchpad), then floating above tiled, then by focus. That is its active workspace's
+/// windows, the special workspace's, and pinned ones, with bounds in points from the
+/// monitor's top-left.
 pub fn window_entries(clients: &[Client], monitor: &Monitor) -> Vec<WindowEntry> {
+    let special = monitor.special_workspace.as_ref().map_or(0, |w| w.id);
+    let on_special = |c: &Client| special != 0 && c.workspace.id == special;
     let mut visible: Vec<&Client> = clients
         .iter()
-        .filter(|c| c.mapped && !c.hidden && c.workspace.id == monitor.active_workspace.id)
+        .filter(|c| {
+            c.mapped
+                && !c.hidden
+                && (c.workspace.id == monitor.active_workspace.id
+                    || on_special(c)
+                    || (c.pinned && c.monitor == i64::from(monitor.id)))
+        })
         .collect();
-    visible.sort_by_key(|c| (!c.floating, c.focus_history_id));
+    visible.sort_by_key(|c| (!on_special(c), !c.floating, c.focus_history_id));
     visible
         .into_iter()
         .map(|c| WindowEntry {
@@ -927,6 +943,34 @@ mod tests {
         assert_eq!(apps, ["kitty", "com.t3tools.T3Code"]);
         assert!(entries[1].frontmost && !entries[0].frontmost);
         assert_eq!(entries[1].bounds, [10, 52, 1900, 1018]);
+    }
+
+    #[test]
+    fn a_shown_special_workspace_and_pinned_windows_are_on_screen() {
+        let mut monitor = monitors().remove(0);
+        let mut all = clients();
+        let mut extra = |class: &str, workspace: i64, pinned: bool| {
+            all.push(
+                serde_json::from_value(serde_json::json!({
+                    "address": format!("0x{class}"), "at": [10, 52], "size": [1900, 1018],
+                    "class": class, "title": "", "workspace": { "id": workspace, "name": "" },
+                    "monitor": 0, "mapped": true, "hidden": false, "floating": pinned,
+                    "pinned": pinned, "focusHistoryID": 9, "pid": 5,
+                }))
+                .unwrap(),
+            );
+        };
+        extra("scratch", -99, false);
+        extra("everywhere", 7, true);
+        let apps = |monitor: &Monitor| -> Vec<String> {
+            window_entries(&all, monitor).into_iter().map(|e| e.app).collect()
+        };
+        // Hidden scratchpad: its windows aren't on screen; a pinned one is on every workspace.
+        assert_eq!(apps(&monitor), ["kitty", "everywhere", "com.t3tools.T3Code"]);
+        monitor.special_workspace = Some(WorkspaceRef { id: -99 });
+        assert_eq!(apps(&monitor), ["scratch", "kitty", "everywhere", "com.t3tools.T3Code"]);
+        monitor.special_workspace = Some(WorkspaceRef { id: 0 });
+        assert_eq!(apps(&monitor).len(), 3);
     }
 
     #[test]

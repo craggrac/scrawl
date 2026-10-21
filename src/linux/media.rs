@@ -99,7 +99,7 @@ pub fn probe(movie: &Path) -> Result<Probe> {
 
 /// Runs `command` to completion, failing with its stderr when it exits non-zero and killing it
 /// when it outlives `deadline`. Both pipes are drained on threads so a chatty child can't block.
-fn run(mut command: Command, name: &str, deadline: Duration) -> Result<Output> {
+pub(crate) fn run(mut command: Command, name: &str, deadline: Duration) -> Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
