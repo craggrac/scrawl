@@ -455,6 +455,8 @@ mod tests {
             on: None,
             pin,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![100, 100, 0],
         }
     }

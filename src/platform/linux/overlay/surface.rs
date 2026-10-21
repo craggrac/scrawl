@@ -422,7 +422,11 @@ impl App {
                 .pointer_screen
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            [px - origin[0] as f32, py - origin[1] as f32]
+            let color = *t
+                .ink_color
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ([px - origin[0] as f32, py - origin[1] as f32], color)
         });
         (
             scene::build(&strokes, live.as_ref(), now_ms, target, tip),

@@ -8,7 +8,9 @@
 use serde::Serialize;
 
 use crate::model::{InteractionEvent, LASER_MS, ScrawlBundle, Stroke};
-use crate::sketch::{FreehandOptions, freehand_outline, slice_laser_window, smooth_laser_points};
+use crate::sketch::{
+    FreehandOptions, figure_segments, freehand_outline, slice_laser_window, smooth_laser_points,
+};
 
 /// Ink stays on screen this long after its mark's last stroke, then fades.
 pub const HOLD_MS: u64 = 2_500;
@@ -54,6 +56,9 @@ pub struct InkStroke {
     pub snaps: Vec<Snap>,
     pub fade_at: u64,
     pub fade_ms: u64,
+    /// `r, g, b` in `0..=1`; absent for the default red.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -171,8 +176,9 @@ pub fn plan(bundle: &ScrawlBundle, video_px: (u32, u32), layers: Layers) -> InkP
                         fade_ms: FADE_MS,
                     });
                 }
-            } else if let Some(ink) = ink_stroke(stroke, (w, h), size, fade_at, vt) {
-                plan.strokes.push(ink);
+            } else {
+                plan.strokes
+                    .extend(ink_strokes(stroke, (w, h), size, fade_at, vt));
             }
         }
     }
@@ -236,12 +242,67 @@ pub fn plan(bundle: &ScrawlBundle, video_px: (u32, u32), layers: Layers) -> InkP
     plan
 }
 
+/// The polygons that draw `stroke`: one for freehand ink, one per side for an arrow or a box
+/// (the helper fills each polygon alone), which show once the figure is finished.
+fn ink_strokes(
+    stroke: &Stroke,
+    (w, h): (f32, f32),
+    size: f32,
+    fade_at: u64,
+    vt: impl Fn(u64) -> u64,
+) -> Vec<InkStroke> {
+    let color =
+        (!stroke.color.is_red()).then(|| stroke.color.rgb().map(|c| round(f32::from(c) / 255.0)));
+    let Some(shape) = stroke.shape else {
+        return ink_stroke(stroke, (w, h), size, fade_at, vt, color)
+            .into_iter()
+            .collect();
+    };
+    let timed = stroke.timed_points();
+    let (Some(&(ax, ay, _)), Some(&(bx, by, end))) = (timed.first(), timed.last()) else {
+        return Vec::new();
+    };
+    let (a, b) = ([ax * w, ay * h], [bx * w, by * h]);
+    figure_segments(shape, a, b, size)
+        .into_iter()
+        .map(|(from, to)| InkStroke {
+            snaps: vec![Snap {
+                t: vt(end),
+                poly: capsule(from, to, size * 0.5)
+                    .iter()
+                    .flat_map(|p| [round(p[0] / w), round(p[1] / h)])
+                    .collect(),
+            }],
+            fade_at,
+            fade_ms: FADE_MS,
+            color,
+        })
+        .collect()
+}
+
+/// A line of radius `r` with round ends, as a polygon.
+fn capsule(a: [f32; 2], b: [f32; 2], r: f32) -> Vec<[f32; 2]> {
+    const ARC: usize = 8;
+    let angle = (b[1] - a[1]).atan2(b[0] - a[0]);
+    let cap = |centre: [f32; 2], from: f32| {
+        (0..=ARC).map(move |i| {
+            let t = from + std::f32::consts::PI * i as f32 / ARC as f32;
+            [centre[0] + r * t.cos(), centre[1] + r * t.sin()]
+        })
+    };
+    // Round `b`'s end from one side of the line to the other, then `a`'s the same way.
+    cap(b, angle - std::f32::consts::FRAC_PI_2)
+        .chain(cap(a, angle + std::f32::consts::FRAC_PI_2))
+        .collect()
+}
+
 fn ink_stroke(
     stroke: &Stroke,
     (w, h): (f32, f32),
     size: f32,
     fade_at: u64,
     vt: impl Fn(u64) -> u64,
+    color: Option<[f32; 3]>,
 ) -> Option<InkStroke> {
     let timed = stroke.timed_points();
     if timed.is_empty() {
@@ -289,6 +350,7 @@ fn ink_stroke(
         snaps,
         fade_at,
         fade_ms: FADE_MS,
+        color,
     })
 }
 
@@ -342,6 +404,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: pts.iter().flat_map(|&(x, y, t)| [x, y, t]).collect(),
         }
     }
@@ -359,6 +423,7 @@ mod tests {
             pin: None,
             on: None,
             description: String::new(),
+            color: Default::default(),
             frame: None,
         }
     }

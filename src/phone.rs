@@ -522,6 +522,7 @@ pub fn build_movie_bundle(
                                 pin: None,
                                 on: None,
                                 description: "flagged this moment".into(),
+                                color: Default::default(),
                                 frame: None,
                             });
                         }
@@ -1018,6 +1019,8 @@ pub fn import(
                 on: None,
                 pin: None,
                 laser: false,
+                color: Default::default(),
+                shape: None,
                 pts,
             })
         })

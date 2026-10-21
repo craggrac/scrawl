@@ -2,12 +2,19 @@
 //! touching only what changed. This is the ink, pin and tip-dot branches of
 //! `laser_overlay.metal`, per pixel, with the same constants and the same final premultiply:
 //! each pixel's coverage is the maximum over the shapes that reach it (not a sum), a pin has a
-//! white halo under its red fill, and the ink is `#ff3b30`.
+//! white halo under its red fill, and the ink is `#ff3b30` (or, for the colours ⇧ + 1 to 4 pick,
+//! the colour's own `rgb`, the one that wins at a pixel where inks of two colours meet).
 
 use super::scene::{Pin, Scene, Segment};
+use crate::model::InkColor;
 
-/// The ink's red, as the shader's `ink_col`.
-const INK: [f32; 3] = [1.0, 0.23, 0.19];
+/// The ink's rgb: red as the shader's `ink_col`, the others as the colour is on a keyframe.
+fn ink_rgb(color: InkColor) -> [f32; 3] {
+    match color {
+        InkColor::Red => [1.0, 0.23, 0.19],
+        other => other.rgb().map(|c| f32::from(c) / 255.0),
+    }
+}
 /// The halo's opacity around a pin.
 const HALO_ALPHA: f32 = 0.82;
 /// Ink radius in points at a pressure of 1; the pressure is clamped to this range.
@@ -60,11 +67,22 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// What a pixel gets from the scene: the ink's coverage and the halo's.
+/// What a pixel gets from the scene: the ink's coverage (in the colour of the shape that
+/// covers it most) and the halo's.
 #[derive(Clone, Copy, Default)]
 struct Coverage {
-    red: f32,
+    ink: f32,
+    color: InkColor,
     halo: f32,
+}
+
+impl Coverage {
+    fn add_ink(&mut self, fill: f32, color: InkColor) {
+        if fill > self.ink {
+            self.ink = fill;
+            self.color = color;
+        }
+    }
 }
 
 /// Side of a damage tile, in device pixels. A frame repaints and damages only the tiles that
@@ -160,6 +178,14 @@ impl Raster {
             for ty in reach.y0 / TILE..=(reach.y1 - 1) / TILE {
                 for tx in reach.x0 / TILE..=(reach.x1 - 1) / TILE {
                     let tile = (ty * self.tiles_x + tx) as usize;
+                    // A long diagonal's box is mostly empty tiles; only the ones it crosses count.
+                    if scene
+                        .segments
+                        .get(shape)
+                        .is_some_and(|s| !self.segment_reaches(s, self.tile_rect(tile)))
+                    {
+                        continue;
+                    }
                     if self.bins[tile].is_empty() {
                         touched.push(tile);
                     }
@@ -195,6 +221,39 @@ impl Raster {
         }
         self.painted = touched;
         damage
+    }
+
+    /// Whether `s` can colour a pixel of `tile`: its distance from the tile's centre is within
+    /// the ink's reach and half the tile's diagonal.
+    fn segment_reaches(&self, s: &Segment, tile: Rect) -> bool {
+        let centre = [
+            (tile.x0 + tile.x1) as f32 / 2.0 / self.scale,
+            (tile.y0 + tile.y1) as f32 / 2.0 / self.scale,
+        ];
+        let half_diagonal = (tile.width() as f32).hypot(tile.height() as f32) / 2.0 / self.scale;
+        let ab = [s.b[0] - s.a[0], s.b[1] - s.a[1]];
+        let len2 = (ab[0] * ab[0] + ab[1] * ab[1]).max(0.0001);
+        let h =
+            (((centre[0] - s.a[0]) * ab[0] + (centre[1] - s.a[1]) * ab[1]) / len2).clamp(0.0, 1.0);
+        let d = (centre[0] - (s.a[0] + ab[0] * h)).hypot(centre[1] - (s.a[1] + ab[1] * h));
+        d <= INK_REACH_PT + half_diagonal
+    }
+
+    /// The part of row `y` of `boxed` that segment `s` can reach: a slanted segment's box is
+    /// mostly empty, so only a band around its line is looked at.
+    fn row_span(&self, s: &Segment, y: i32, boxed: Rect) -> (i32, i32) {
+        let (dx, dy) = (s.b[0] - s.a[0], s.b[1] - s.a[1]);
+        if dy.abs() < 0.001 {
+            return (boxed.x0, boxed.x1);
+        }
+        // The line's x at the row's centre; a pixel further sideways than this is further from the
+        // line (and so from the segment) than the ink reaches.
+        let centre = s.a[0] + ((y as f32 + 0.5) / self.scale - s.a[1]) * dx / dy;
+        let half = INK_REACH_PT * dx.hypot(dy) / dy.abs();
+        (
+            (((centre - half) * self.scale).floor() as i32 - 1).max(boxed.x0),
+            (((centre + half) * self.scale).ceil() as i32 + 1).min(boxed.x1),
+        )
     }
 
     /// The pixels shape `index` (a segment, then a pin, then the tip) can reach, clipped to the
@@ -245,13 +304,13 @@ impl Raster {
             } else if shape < segments + scene.pins.len() {
                 self.pin(&scene.pins[shape - segments], area);
             } else if let Some(tip) = scene.tip {
-                self.tip(tip, area);
+                self.tip(tip, scene.tip_color, area);
             }
         }
         for y in 0..h {
             for x in 0..w {
                 let cov = self.cover[y * w + x];
-                if cov.red <= 0.001 && cov.halo <= 0.001 {
+                if cov.ink <= 0.001 && cov.halo <= 0.001 {
                     continue;
                 }
                 let at = ((area.y0 as usize + y) * self.width as usize + area.x0 as usize + x) * 4;
@@ -283,7 +342,8 @@ impl Raster {
         let alpha = s.alpha.clamp(0.0, 1.0);
         let stride = area.width() as usize;
         for y in boxed.y0..boxed.y1 {
-            for x in boxed.x0..boxed.x1 {
+            let (x0, x1) = self.row_span(s, y, boxed);
+            for x in x0..x1 {
                 let p = [(x as f32 + 0.5) / self.scale, (y as f32 + 0.5) / self.scale];
                 let h = (((p[0] - s.a[0]) * ab[0] + (p[1] - s.a[1]) * ab[1]) / len2).clamp(0.0, 1.0);
                 let d = (p[0] - (s.a[0] + ab[0] * h)).hypot(p[1] - (s.a[1] + ab[1] * h));
@@ -293,7 +353,7 @@ impl Raster {
                     let fill = smoothstep(r + 0.70, (r - 0.70).max(0.0), d) * alpha;
                     let slot = &mut self.cover
                         [(y - area.y0) as usize * stride + (x - area.x0) as usize];
-                    slot.red = slot.red.max(fill);
+                    slot.add_ink(fill, s.color);
                 }
             }
         }
@@ -313,13 +373,13 @@ impl Raster {
                     let slot = &mut self.cover
                         [(y - area.y0) as usize * stride + (x - area.x0) as usize];
                     slot.halo = slot.halo.max(halo);
-                    slot.red = slot.red.max(fill);
+                    slot.add_ink(fill, InkColor::Red);
                 }
             }
         }
     }
 
-    fn tip(&mut self, tip: [f32; 2], area: Rect) {
+    fn tip(&mut self, tip: [f32; 2], color: InkColor, area: Rect) {
         let boxed = self.pixel_box(tip, tip, TIP_REACH_PT, area);
         let stride = area.width() as usize;
         for y in boxed.y0..boxed.y1 {
@@ -330,7 +390,7 @@ impl Raster {
                     let fill = smoothstep(2.6, 1.4, d);
                     let slot = &mut self.cover
                         [(y - area.y0) as usize * stride + (x - area.x0) as usize];
-                    slot.red = slot.red.max(fill);
+                    slot.add_ink(fill, color);
                 }
             }
         }
@@ -347,9 +407,9 @@ fn composite(cov: Coverage) -> [u8; 4] {
         rgb = [h; 3];
         a = h;
     }
-    if cov.red > 0.001 {
-        let r = cov.red;
-        for (out, ink) in rgb.iter_mut().zip(INK) {
+    if cov.ink > 0.001 {
+        let r = cov.ink;
+        for (out, ink) in rgb.iter_mut().zip(ink_rgb(cov.color)) {
             *out = ink * r + *out * (1.0 - r);
         }
         a = r + a * (1.0 - r);
@@ -371,6 +431,7 @@ mod tests {
             w0: w,
             w1: w,
             alpha,
+            color: InkColor::Red,
         }
     }
 
@@ -438,6 +499,7 @@ mod tests {
             w0: 0.55,
             w1: 1.15,
             alpha: 1.0,
+            color: InkColor::Red,
         }]));
         assert_eq!(raster.pixel(102, 102)[3], 0);
         assert!(raster.pixel(198, 102)[3] > 240);
@@ -651,5 +713,223 @@ mod tests {
         times.sort();
         eprintln!("opposite corners, 400 segments: median {:?}, worst {:?}", times[10], times[19]);
         assert!(times[19] < std::time::Duration::from_millis(20), "{:?}", times[19]);
+    }
+
+    /// Premultiplied B, G, R, A of a colour at full coverage.
+    fn bgra(color: InkColor) -> [u8; 4] {
+        let [r, g, b] = color.rgb();
+        [b, g, r, 255]
+    }
+
+    #[test]
+    fn ink_is_drawn_in_its_colour_and_the_tip_dot_in_the_one_picked() {
+        for color in [
+            InkColor::Red,
+            InkColor::Yellow,
+            InkColor::Green,
+            InkColor::Blue,
+        ] {
+            let mut raster = Raster::new(400, 300, 1);
+            let mut segment = seg([100.0, 100.5], [200.0, 100.5], 1.0, 1.0);
+            segment.color = color;
+            raster.draw(&scene(vec![segment]));
+            assert_eq!(raster.pixel(150, 100), bgra(color), "{color:?}");
+            let mut raster = Raster::new(400, 300, 1);
+            raster.draw(&Scene {
+                tip: Some([100.5, 100.5]),
+                tip_color: color,
+                ..Scene::default()
+            });
+            assert_eq!(raster.pixel(100, 100), bgra(color), "{color:?} tip");
+        }
+    }
+
+    #[test]
+    fn where_two_colours_cross_the_one_covering_the_pixel_more_wins() {
+        let mut raster = Raster::new(400, 300, 1);
+        let mut vertical = seg([150.5, 50.0], [150.5, 150.0], 1.0, 0.6);
+        vertical.color = InkColor::Blue;
+        raster.draw(&scene(vec![line(1.0, 1.0).segments[0], vertical]));
+        // The red line is whole at the crossing; the faded blue is under it.
+        assert_eq!(raster.pixel(150, 100), RED_FULL);
+        assert_eq!(
+            raster.pixel(150, 60)[0],
+            (255.0_f32 * 0.6 * 0.6).round() as u8
+        );
+    }
+
+    #[test]
+    fn a_long_diagonal_arrow_and_a_big_box_damage_only_the_tiles_they_cross() {
+        use crate::model::{InkShape, Stroke};
+        let figure = |shape, a: [i32; 2], b: [i32; 2]| Stroke {
+            t0: 0,
+            t1: 0,
+            fw: 1_920,
+            fh: 1_080,
+            on: None,
+            pin: None,
+            laser: false,
+            color: InkColor::Green,
+            shape: Some(shape),
+            pts: vec![a[0], a[1], 0, b[0], b[1], 0],
+        };
+        let strokes = [
+            figure(InkShape::Arrow, [500, 800], [9_500, 9_000]),
+            figure(InkShape::Box, [1_000, 1_500], [7_000, 6_000]),
+        ];
+        let scene =
+            super::super::scene::build(&strokes, None, 0, [0.0, 0.0, 1_920.0, 1_080.0], None);
+        let mut raster = Raster::new(1_920, 1_080, 1);
+        let mut times = Vec::new();
+        let mut damage = Vec::new();
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            damage = raster.draw(&scene);
+            times.push(started.elapsed());
+        }
+        times.sort();
+        eprintln!(
+            "arrow + box across the screen: median {:?}, worst {:?}",
+            times[10], times[19]
+        );
+        let screen = 1_920_i64 * 1_080;
+        // The arrow's box alone is three quarters of the screen; the tiles it crosses and the
+        // box's sides are a quarter at most, and the inside of the box is left alone.
+        assert!(area(&damage) * 4 < screen, "{} of {screen}", area(&damage));
+        let covers = |x: i32, y: i32| {
+            damage
+                .iter()
+                .any(|r| (r.x0..r.x1).contains(&x) && (r.y0..r.y1).contains(&y))
+        };
+        assert!(!covers(300, 900) && !covers(1_500, 200));
+        assert_eq!(raster.pixel(500, 900)[3], 0);
+        assert!(
+            times[19] < std::time::Duration::from_millis(20),
+            "{:?}",
+            times[19]
+        );
+        // Along the box's top side (y 162) it is green.
+        assert_eq!(raster.pixel(1_000, 162), bgra(InkColor::Green));
+    }
+
+    /// With `SCRAWL_INK_SAMPLES=<dir>`, writes the overlay's raster and the keyframe renderer's
+    /// picture of the same ink (every colour, an arrow, a box, a pin) over a page-like
+    /// background, to look at.
+    #[test]
+    fn writes_sample_frames_when_asked() {
+        use crate::model::{InkShape, Keyframe, KeyframeReason, RgbaFrame, Stroke};
+        let Some(dir) = std::env::var_os("SCRAWL_INK_SAMPLES") else {
+            return;
+        };
+        let (w, h) = (960_u32, 540_u32);
+        let norm = |v: f32| (v * crate::model::SCALE as f32).round() as i32;
+        let make = |color, shape, pin, points: &[[f32; 2]]| Stroke {
+            t0: 100,
+            t1: 600,
+            fw: w,
+            fh: h,
+            on: None,
+            pin,
+            laser: false,
+            color,
+            shape,
+            pts: points
+                .iter()
+                .enumerate()
+                .flat_map(|(i, p)| [norm(p[0]), norm(p[1]), (i * 10) as i32])
+                .collect(),
+        };
+        let wavy: Vec<[f32; 2]> = (0..40)
+            .map(|i| [0.08 + i as f32 * 0.012, 0.2 + 0.03 * (i as f32 * 0.5).sin()])
+            .collect();
+        let circle: Vec<[f32; 2]> = (0..=40)
+            .map(|i| {
+                let a = std::f32::consts::TAU * i as f32 / 40.0;
+                [0.72 + 0.12 * a.cos(), 0.22 + 0.17 * a.sin()]
+            })
+            .collect();
+        let strokes = [
+            make(InkColor::Red, None, None, &wavy),
+            make(InkColor::Yellow, None, None, &circle),
+            make(
+                InkColor::Green,
+                Some(InkShape::Arrow),
+                None,
+                &[[0.1, 0.8], [0.45, 0.45]],
+            ),
+            make(
+                InkColor::Blue,
+                Some(InkShape::Box),
+                None,
+                &[[0.55, 0.5], [0.9, 0.85]],
+            ),
+            make(
+                InkColor::Green,
+                Some(InkShape::Arrow),
+                None,
+                &[[0.5, 0.95], [0.5, 0.6]],
+            ),
+            make(InkColor::Red, None, Some(1), &[[0.3, 0.55]]),
+        ];
+        // A pale page with text-like lines, and a dark half, so every colour is seen on both.
+        let mut page = vec![0_u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let at = ((y * w + x) * 4) as usize;
+                let dark = x > w / 2 && y > h / 2;
+                let text = y % 24 < 6 && x % 200 < 150 && x > 40;
+                let v = match (dark, text) {
+                    (true, true) => 120,
+                    (true, false) => 38,
+                    (false, true) => 90,
+                    (false, false) => 246,
+                };
+                page[at..at + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        // The overlay: the live raster composited over the page.
+        let scene = super::super::scene::build(
+            &strokes,
+            None,
+            650,
+            [0.0, 0.0, w as f32, h as f32],
+            Some(([480.0, 270.0], InkColor::Yellow)),
+        );
+        let mut raster = Raster::new(w, h, 1);
+        raster.draw(&scene);
+        let mut overlay = page.clone();
+        for (out, src) in overlay
+            .chunks_exact_mut(4)
+            .zip(raster.pixels().chunks_exact(4))
+        {
+            let keep = 1.0 - f32::from(src[3]) / 255.0;
+            out[0] = (f32::from(src[2]) + f32::from(out[0]) * keep).round() as u8;
+            out[1] = (f32::from(src[1]) + f32::from(out[1]) * keep).round() as u8;
+            out[2] = (f32::from(src[0]) + f32::from(out[2]) * keep).round() as u8;
+        }
+        let dir = std::path::PathBuf::from(dir);
+        let write = |name: &str, frame: &RgbaFrame| {
+            std::fs::write(dir.join(name), crate::render::encode_png(frame).unwrap()).unwrap();
+        };
+        write("overlay.png", &RgbaFrame::new(0, w, h, overlay));
+        // The keyframe renderer's picture, at 1.0 s with every mark drawn.
+        let keyframe = Keyframe {
+            index: 1,
+            t: 1_000,
+            reason: KeyframeReason::Mark,
+            file: "frames/1.png".into(),
+            event: String::new(),
+            said: None,
+            mark_id: None,
+            cursor: None,
+        };
+        let frame = RgbaFrame::new(1_000, w, h, page);
+        let marks = crate::sketch::marks_of(&strokes);
+        for mark in &marks {
+            eprintln!("{} | {:?} | {}", mark.id, mark.shape, mark.description);
+        }
+        let shown =
+            crate::render::render_annotated_keyframe(&frame, &keyframe, &strokes, &marks, &[]);
+        write("keyframe.png", &shown);
     }
 }

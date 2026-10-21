@@ -95,8 +95,24 @@ It listens on `$XDG_RUNTIME_DIR/scrawl/ctl.sock` (owner-only); `toggle`, `stop`,
 Hold **⇧** during a recording and move the pointer to draw in red (`#ff3b30`); ⇧-click drops a
 numbered pin (a press that moves under 12 pt and lets go within 1 s; longer is ink). Ink holds for
 0.65 s after you stop and fades over the next 0.65 s; pins stay. The strokes and pins are in the bundle
-(`scrawl.json`, the marks in `summary.md`, redrawn on the keyframes) as on macOS. ⇧ with Ctrl,
-Alt or Super draws nothing, and a ⇧ tap on the spot (a capital letter) leaves no mark.
+(`scrawl.json`, the marks in `summary.md`, redrawn on the keyframes) as on macOS. ⇧ with Super draws
+nothing, and a ⇧ tap on the spot (a capital letter) leaves no mark. Linux adds three tools, none of
+which is on macOS:
+
+| Keys | What it does |
+|---|---|
+| hold **⇧**, press **1 / 2 / 3 / 4** | the strokes from then on are red / yellow / green / blue (the tip dot at the pointer shows the colour; it goes back to red at the next recording) |
+| hold **⇧ + Ctrl** and move | an arrow from where you pressed the keys to the pointer (head at the pointer) |
+| hold **⇧ + Alt** and move | a box with the pointer and where you pressed the keys as opposite corners |
+| **Ctrl+Z** | takes back the last stroke or pin, from the overlay and from the bundle (macOS: ⌘Z) |
+
+Arrows and boxes fade like ink and take the picked colour. Changing the modifier or the colour
+while drawing ends the stroke and starts a new one (release Ctrl to go back to freehand). The
+bundle's `scrawl.json` gets `"color": "yellow"`, `"green"` or `"blue"` on a stroke (absent is red)
+and `"shape": "arrow"` or `"box"` (a figure's `pts` are its two ends, a box's opposite corners); the
+marks come out as `arrow` ("drew an arrow from … pointing to …") and `box` ("boxed region …"), with
+" in yellow" and so on when not red. Typed text on the screen isn't built: it needs keyboard focus,
+which the overlay deliberately never takes.
 
 - **The ink is in the video.** It is drawn by a `wlr-layer-shell` surface on the overlay layer
   (namespace `scrawl-ink`, no input region: clicks and hover go to the windows under it), and
@@ -112,10 +128,16 @@ Alt or Super draws nothing, and a ⇧ tap on the spot (a capital letter) leaves 
   without ink. The overlay sits over the output holding the target's centre. It maps nothing until
   there is ink and makes no commit while idle (`wf-recorder` writes a frame per commit).
 - **The pointer comes from Hyprland** (`cursorpos` on its socket, every 8 ms while ⇧ is held), since
-  evdev has no position. Only ⇧, Ctrl, Alt and Super presses and the mouse buttons are read for ink,
-  and no key is kept, as for clicks above. Needs the `input` group like clicks do.
-- **No Ctrl+Z.** evdev can't consume a key, so a Scrawl Ctrl+Z would also undo in whatever app has
-  the keyboard. The capsule's Undo chip is the only undo, and the capsule is hidden while recording.
+  evdev has no position. Only ⇧, Ctrl, Alt and Super presses, the keys 1 to 4 and Z with those held, and the mouse buttons
+  are read for ink, and no key is kept, as for clicks above. Needs the `input` group like clicks do.
+- **Evdev only watches, so the app gets the keys too.** Ctrl+Z is Scrawl's undo during a recording
+  and also the focused app's (this is what macOS does with ⌘Z, too: its tap doesn't swallow it);
+  pressing ⇧ + 1 to 4 also types `!@#$` there, and Ctrl+Z only acts while a recording runs. Scrawl
+  takes nothing off the keyboard, which is also why the figure keys are ⇧ + Ctrl and ⇧ + Alt held while
+  you move, with no click: a click would reach the app as Ctrl+Shift-click (a link in a new window
+  in browsers). The combinations were picked to be free in a stock Hyprland setup (the only
+  ⇧ + Alt bind is the recording shortcut's own; check yours with `hyprctl binds -j`), but a few apps
+  react to an Alt tap (Firefox shows its menu bar when Alt is let go).
 - **The picker draws its own dim** (`TargetPickerWindow`): the screen dimmed, a cutout over the
   hovered window, the screen or the dragged area, with a blue tint and border for a window or screen
   and a thin white one for an area. Its Hyprland rule has `rounding = 0` so the screen's corners dim.

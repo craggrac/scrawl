@@ -532,6 +532,8 @@ mod tests {
             on: Some("group".into()),
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![0, 0, 0],
         }];
         let pill = Target {

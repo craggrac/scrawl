@@ -427,6 +427,7 @@ fn mark_text(mark: &Mark) -> String {
         Shape::Underline => "underlined".to_owned(),
         Shape::Line => "drew a line".to_owned(),
         Shape::Arrow => "drew an arrow".to_owned(),
+        Shape::Box => "boxed".to_owned(),
         Shape::Pin => format!("pin {}", mark.pin.unwrap_or(1)),
         Shape::Tap => "tapped".to_owned(),
         Shape::Mark => "marked".to_owned(),
@@ -439,6 +440,9 @@ fn mark_text(mark: &Mark) -> String {
             _ => " ",
         });
         text.push_str(&quote_label(on));
+    }
+    if !mark.color.is_red() {
+        text.push_str(&format!(" in {}", mark.color.name()));
     }
     if mark.strokes.len() > 1 {
         text.push_str(&format!(" ({} strokes)", mark.strokes.len()));
@@ -721,6 +725,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![p(x), p(y), 0, p(x + 0.05), p(y), 200, p(x + 0.1), p(y), 400],
         }
     }
