@@ -627,6 +627,19 @@ mod tests {
             .sum()
     }
 
+    /// The fastest of `runs` runs of `work`: on a busy machine some runs are slowed by other
+    /// processes, so the minimum is what the code costs.
+    fn best_of(runs: usize, mut work: impl FnMut()) -> std::time::Duration {
+        (0..runs)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                work();
+                started.elapsed()
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
     /// 200 segments of a wavy line from `from` rightwards.
     fn wave(from: [f32; 2], step: f32) -> Vec<Segment> {
         (0..200)
@@ -683,15 +696,18 @@ mod tests {
             .collect();
         let scene = scene(segments);
         let mut raster = Raster::new(1_920, 1_080, 1);
-        // The first draw also allocates; the bound is generous (the spike measured 1.7 ms for
-        // these at opt-level 2), so only an accidental full-screen loop trips it.
-        let mut worst = std::time::Duration::ZERO;
-        for _ in 0..5 {
-            let started = std::time::Instant::now();
+        // Structural, so it holds on any machine: a walk of this size touches a small part of
+        // the screen, not every tile.
+        let damage = raster.draw(&scene);
+        let screen = 1_920_i64 * 1_080;
+        assert!(area(&damage) * 8 < screen, "{} of {screen}", area(&damage));
+        // Timing: the best of many draws, so a loaded machine (the whole suite in parallel, other
+        // builds) can't fail it, while an accidental full-screen loop is slow in every draw. The
+        // bound is generous (the spike measured 1.7 ms for these at opt-level 2).
+        let best = best_of(30, || {
             raster.draw(&scene);
-            worst = worst.max(started.elapsed());
-        }
-        assert!(worst < std::time::Duration::from_millis(20), "{worst:?}");
+        });
+        assert!(best < std::time::Duration::from_millis(20), "{best:?}");
     }
 
     #[test]
@@ -780,18 +796,11 @@ mod tests {
         let scene =
             super::super::scene::build(&strokes, None, 0, [0.0, 0.0, 1_920.0, 1_080.0], None);
         let mut raster = Raster::new(1_920, 1_080, 1);
-        let mut times = Vec::new();
-        let mut damage = Vec::new();
-        for _ in 0..20 {
-            let started = std::time::Instant::now();
-            damage = raster.draw(&scene);
-            times.push(started.elapsed());
-        }
-        times.sort();
-        eprintln!(
-            "arrow + box across the screen: median {:?}, worst {:?}",
-            times[10], times[19]
-        );
+        let damage = raster.draw(&scene);
+        let best = best_of(20, || {
+            assert_eq!(raster.draw(&scene), damage, "an unchanged scene damages the same tiles");
+        });
+        eprintln!("arrow + box across the screen: best {best:?}");
         let screen = 1_920_i64 * 1_080;
         // The arrow's box alone is three quarters of the screen; the tiles it crosses and the
         // box's sides are a quarter at most, and the inside of the box is left alone.
@@ -803,11 +812,9 @@ mod tests {
         };
         assert!(!covers(300, 900) && !covers(1_500, 200));
         assert_eq!(raster.pixel(500, 900)[3], 0);
-        assert!(
-            times[19] < std::time::Duration::from_millis(20),
-            "{:?}",
-            times[19]
-        );
+        // Timing is the best of the draws above (the strict part of this test is the damage):
+        // a loaded machine slows some draws, not all of them.
+        assert!(best < std::time::Duration::from_millis(20), "{best:?}");
         // Along the box's top side (y 162) it is green.
         assert_eq!(raster.pixel(1_000, 162), bgra(InkColor::Green));
     }
