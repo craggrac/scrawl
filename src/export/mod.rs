@@ -12,13 +12,19 @@
 //! The helper reads the video with AVAssetReader, composites with Core Image, draws the
 //! annotations with Core Graphics into the same pixel buffers, and hardware-encodes with
 //! AVAssetWriter. Nothing is decoded into Rust.
+//!
+//! On Linux `crate::linux::export` renders the same plan with `ffmpeg`: the recording already has
+//! the ink burned in by the overlay, so only the crop, the camera, the click ripples and the audio
+//! are done here.
 
 pub mod camera;
 pub mod crop;
 pub mod ink;
 
+#[cfg(target_os = "macos")]
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -74,42 +80,51 @@ pub struct Exported {
     pub bytes: u64,
 }
 
-/// Where `~/Movies/Scrawl/<bundle>.mp4` goes for a bundle.
+/// Where `<bundle>.mp4` goes for a bundle: `~/Movies/Scrawl` on macOS, `<Videos>/Scrawl` on Linux.
 pub fn default_output(bundle_dir: &Path) -> PathBuf {
     let name = bundle_dir
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("scrawl");
-    dirs::home_dir()
+    #[cfg(target_os = "linux")]
+    let dir = crate::linux::export::default_dir();
+    #[cfg(not(target_os = "linux"))]
+    let dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Movies/Scrawl")
-        .join(format!("{name}.mp4"))
+        .join("Movies/Scrawl");
+    dir.join(format!("{name}.mp4"))
 }
 
+/// Everything a renderer needs: the helper reads it as JSON, the Linux renderer directly.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Plan<'a> {
-    video: &'a Path,
-    out: &'a Path,
-    audio: Option<&'a Path>,
-    audio_start_ms: u64,
-    audio_length_ms: u64,
-    width: u32,
-    height: u32,
-    fps: u32,
-    codec: &'a str,
-    duration_ms: u64,
-    crop: Rect,
-    camera: Option<Vec<[f64; 5]>>,
-    ink: &'a ink::InkPlan,
+pub(crate) struct Plan<'a> {
+    pub video: &'a Path,
+    pub out: &'a Path,
+    pub audio: Option<&'a Path>,
+    pub audio_start_ms: u64,
+    pub audio_length_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub codec: &'a str,
+    pub duration_ms: u64,
+    pub crop: Rect,
+    /// `[t_ms, x0, y0, x1, y1]` rows, interpolated linearly; `None` holds the crop.
+    pub camera: Option<Vec<[f64; 5]>>,
+    pub ink: &'a ink::InkPlan,
+    /// The recording's own size in pixels (the Linux renderer needs it to crop and sample).
+    #[serde(skip)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub video_px: (u32, u32),
 }
 
-/// What the helper's `export` reports when it is done.
+/// What a renderer reports when it is done.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Done {
-    duration_ms: u64,
-    bytes: u64,
+pub(crate) struct Done {
+    pub duration_ms: u64,
+    pub bytes: u64,
 }
 
 /// Camera focuses for a bundle, on the video's clock: clicks, drags, drawn marks and laser
@@ -204,7 +219,7 @@ pub fn export(
     progress: &mut dyn FnMut(f32),
 ) -> Result<Exported> {
     let video = match &bundle.video {
-        Some(name) => dir.join(name),
+        Some(name) => member(dir, name)?,
         None => dir.join("recording.mp4"),
     };
     if !video.is_file() {
@@ -237,11 +252,11 @@ pub fn export(
     // The audio: an iPhone movie's own track (full quality, on the movie's clock), else
     // `audio.wav`, which Scrawl records from the bundle's start, `video_offset_ms` before the
     // video's.
-    let wav = bundle
-        .audio
-        .as_ref()
-        .map(|name| dir.join(name))
-        .filter(|p| p.is_file());
+    let wav = match &bundle.audio {
+        Some(name) => Some(member(dir, name)?),
+        None => None,
+    }
+    .filter(|p| p.is_file());
     let (audio, audio_start, audio_length) =
         if bundle.source.as_deref() == Some("iphone") && probe.audio_tracks > 0 {
             (Some(video.clone()), 0, probe.duration_ms)
@@ -259,8 +274,10 @@ pub fn export(
         .zoom
         .then(|| camera_rows(bundle, crop, video_px, probe.duration_ms))
         .filter(|keys| !keys.iter().all(|k| k.rect == crop));
+    // On Linux the overlay's ink is already in `recording.mp4` (it is composited on the screen
+    // that is recorded), so drawing it again would double it and `--no-ink` cannot take it out.
     let layers = ink::Layers {
-        ink: options.ink,
+        ink: options.ink && cfg!(not(target_os = "linux")),
         clicks: options.clicks,
     };
     let ink = ink::plan(bundle, video_px, layers);
@@ -297,12 +314,9 @@ pub fn export(
                 .collect()
         }),
         ink: &ink,
+        video_px,
     };
-    let plan_path =
-        std::env::temp_dir().join(format!("scrawl-export-{}.json", crate::make_bundle_id()));
-    std::fs::write(&plan_path, serde_json::to_vec(&plan)?)?;
-    let result = run_helper(&plan_path, options.background, progress);
-    let _ = std::fs::remove_file(&plan_path);
+    let result = render(&plan, options.background, progress);
     let done = match result {
         Ok(done) => done,
         Err(error) => {
@@ -326,6 +340,20 @@ pub fn export(
     })
 }
 
+/// A file the manifest names, inside the bundle: a plain relative path, so a crafted manifest
+/// can't point the renderer at some other file on the machine.
+fn member(dir: &Path, name: &str) -> Result<PathBuf> {
+    let relative = Path::new(name);
+    ensure!(
+        !name.is_empty()
+            && relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))),
+        "The bundle names a file outside itself: {name}"
+    );
+    Ok(dir.join(relative))
+}
+
 fn wav_duration_ms(path: &Path) -> Result<u64> {
     let reader = hound::WavReader::open(path)
         .with_context(|| format!("Could not read {}", path.display()))?;
@@ -337,8 +365,25 @@ fn wav_duration_ms(path: &Path) -> Result<u64> {
     Ok(u64::from(reader.duration()) * 1_000 / u64::from(spec.sample_rate))
 }
 
+#[cfg(target_os = "linux")]
+fn render(plan: &Plan, background: bool, progress: &mut dyn FnMut(f32)) -> Result<Done> {
+    crate::linux::export::render(plan, background, progress)
+}
+
+/// Writes the plan to a temp file and runs `scrawl-helper export` on it.
+#[cfg(target_os = "macos")]
+fn render(plan: &Plan, background: bool, progress: &mut dyn FnMut(f32)) -> Result<Done> {
+    let plan_path =
+        std::env::temp_dir().join(format!("scrawl-export-{}.json", crate::make_bundle_id()));
+    std::fs::write(&plan_path, serde_json::to_vec(plan)?)?;
+    let result = run_helper(&plan_path, background, progress);
+    let _ = std::fs::remove_file(&plan_path);
+    result
+}
+
 /// Runs `scrawl-helper export PLAN`, reading its JSON lines: `{"progress": f}` and a final
 /// `{"done": {...}}`.
+#[cfg(target_os = "macos")]
 fn run_helper(plan: &Path, background: bool, progress: &mut dyn FnMut(f32)) -> Result<Done> {
     let helper = crate::helper::path()?;
     let mut command = if background {
@@ -410,6 +455,17 @@ pub fn describe(exported: &Exported) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn default_output_lands_in_a_scrawl_folder_under_videos() {
+        let path = default_output(Path::new("/x/scrawl-17-9.scrawl"));
+        assert!(
+            path.ends_with("Scrawl/scrawl-17-9.mp4"),
+            "{}",
+            path.display()
+        );
+    }
+
     fn bundle() -> ScrawlBundle {
         serde_json::from_value(serde_json::json!({
             "version": 1, "id": "t", "createdAtMs": 0, "durationMs": 20_000,
@@ -453,6 +509,17 @@ mod tests {
         assert_eq!(keys.last().unwrap().rect, [0.0, 0.0, 1.0, 1.0], "ends wide");
     }
 
+    #[test]
+    fn manifest_file_names_must_stay_inside_the_bundle() {
+        let dir = Path::new("/b/x.scrawl");
+        assert_eq!(member(dir, "audio.wav").unwrap(), dir.join("audio.wav"));
+        assert_eq!(member(dir, "media/a.mp4").unwrap(), dir.join("media/a.mp4"));
+        for bad in ["/etc/passwd", "../other/audio.wav", "a/../../b", "", ".", "a/.."] {
+            assert!(member(dir, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn default_output_lands_in_movies_scrawl() {
         let path = default_output(Path::new("/x/scrawl-17-9.scrawl"));

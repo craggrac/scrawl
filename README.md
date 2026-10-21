@@ -41,7 +41,7 @@ bind = ALT SHIFT, S, exec, scrawl toggle
 
 Press it to start and again to stop. The bundle lands in `~/.local/share/scrawl/captures/` and its
 summary on the clipboard; `scrawl send latest --session ses_…` delivers it to OpenCode. Not yet on
-Linux: iPhone capture and video export.
+Linux: iPhone capture.
 
 ### The app
 
@@ -735,9 +735,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.kitlangton.scrawl.se
 
 `scrawl export` turns a bundle into one shareable `.mp4`: H.264 (`--hevc` for HEVC) with AAC audio in
 sync, the red ink, pins, laser and click ripples burned in at the times they happened, cropped to
-where the activity was. It runs in `scrawl-helper` on AVFoundation (hardware decode and encode, Core
-Image for the crop, Core Graphics for the ink), so nothing is decoded into Rust and ffmpeg isn't
-needed.
+where the activity was. On macOS it runs in `scrawl-helper` on AVFoundation (hardware decode and
+encode, Core Image for the crop, Core Graphics for the ink), so nothing is decoded into Rust and
+ffmpeg isn't needed. On Linux it runs on `ffmpeg` ([below](#export-on-linux)).
 
 ```sh
 scrawl export latest                              # ~/Movies/Scrawl/<bundle>.mp4
@@ -760,6 +760,32 @@ scrawl export latest --crop 0.1,0.2,0.6,0.5       # x,y,w,h as fractions, or pix
 - **Menu**: with **Video export** on in Settings › Recording (`"videoExport": true` in
   `~/.config/scrawl/config.json`, default off), the menu shows **Export Last Capture as Video…**. It saves to `~/Movies/Scrawl/<name>.mp4`, shows progress
   beside the menu bar icon, and reveals the file in Finder. The command works without the flag.
+
+### Export on Linux
+
+`scrawl export` takes the same flags and makes the same picture (the crop and the zoom camera are
+computed by the same code), rendered with `ffmpeg` and `ffprobe` (both already needed): H.264 with
+`libx264` (`--hevc`: `libx265`, tagged `hvc1`) and AAC, `audio.wav` starting where the video does
+(`videoOffsetMs`). `--crop`, `--size` (long edge, even sides, never scaled up), `--fps` and `--zoom`
+all work. The output defaults to `$(xdg-user-dir VIDEOS)/Scrawl/<bundle>.mp4`, `~/Videos/Scrawl` when
+there is no Videos folder.
+
+- **Ink is already in the video.** The overlay draws it on the screen that `wf-recorder` records, so
+  `recording.mp4` has it and the export does not draw it again. That also means `--no-ink` cannot take
+  it out (it prints a note and exports the same); the ink is only left out of a recording made
+  without the app, which had none. The auto-zoom still moves toward the marks.
+- **Click ripples** are drawn by the export, at the times of the clicks, in the cropped and zoomed
+  picture; `--no-clicks` leaves them out. Touch trails and the laser are iPhone and macOS things.
+- **How it renders.** With no zoom and no ripples (no clicks in the recording, or `--no-clicks`) one
+  `ffmpeg` does everything. Otherwise a decoding `ffmpeg` pipes raw frames at the output rate to Scrawl,
+  which draws the ripples and, for `--zoom`, resamples each frame to the camera's rectangle for its
+  time (exact fractional position: bilinear zooming in, area average scaling down; a `crop` filter
+  would round to whole pixels and shimmer), and an encoding `ffmpeg` adds the audio. A 15 s 1080p
+  recording takes about 5 s without zoom and 15 s with it on a busy desktop (about real time with zoom,
+  about three times faster without).
+- **Menu.** With `"videoExport": true` in `~/.config/scrawl/config.json` the tray menu has **Export
+  Last Capture as Video…**. It runs at low priority, notifies when it starts and finishes (with the
+  path), and the entry appears when the menu is next rebuilt (after a recording, or on the next start).
 
 ## Keeping captures small
 

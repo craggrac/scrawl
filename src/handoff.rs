@@ -568,7 +568,7 @@ pub fn auto_send() -> bool {
 
 /// Whether the menu offers video export (`videoExport`, default off). `scrawl export` works
 /// either way.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn video_export() -> bool {
     config().video_export.unwrap_or(false)
 }
