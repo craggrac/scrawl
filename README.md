@@ -192,7 +192,8 @@ the capture, so a password manager open on the side never reaches the agent or t
   frame keeping its time) and the rest is copied, then they are joined again; the audio of a recording
   that has some is copied. It runs in the finish, next to the transcription, before the keyframes are
   decoded, and shows as `redact …ms` in `finish timings`. A window there for the whole recording
-  re-encodes all of it (about real time at 1080p; see the numbers in the report).
+  re-encodes all of it (about 40 CPU-seconds per 15 s of 1080p; a window shown for a few seconds,
+  about 15 to 25, because pieces start at keyframes).
 - **Fails closed.** The pieces are written under `$XDG_RUNTIME_DIR` (memory), and the recording is
   replaced by the finished file. If the rewrite fails, `recording.mp4` is deleted rather than kept
   unblurred (the log says so).
