@@ -582,6 +582,19 @@ impl ActiveRecording {
 }
 
 /// Shared coordinator owned by the GPUI app.
+/// Keeps the overlay's window out of the recording and lets clicks through it. A platform
+/// whose overlay has no window id (Linux: 0) has nothing to name.
+fn exclude_overlay_window(telemetry: &SharedCaptureTelemetry, id: u32) {
+    if id == 0 {
+        return;
+    }
+    for ids in [&*telemetry.excluded_window_ids, &telemetry.passthrough_window_ids] {
+        ids.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(id);
+    }
+}
+
 pub struct ScrawlCoordinator {
     telemetry: Arc<SharedCaptureTelemetry>,
     active_recording: Option<ActiveRecording>,
@@ -2474,16 +2487,7 @@ impl ScrawlCoordinator {
                 .map_err(|error| scrawl_log(format!("Metal overlay failed: {error}")))
                 .ok();
             if let Some(ref ov) = overlay {
-                self.telemetry
-                    .excluded_window_ids
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(ov.window_number());
-                self.telemetry
-                    .passthrough_window_ids
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(ov.window_number());
+                exclude_overlay_window(&self.telemetry, ov.window_number());
             }
             self.picker_metal_overlay = overlay;
         }
@@ -2573,16 +2577,7 @@ impl ScrawlCoordinator {
                 .map_err(|error| scrawl_log(format!("Metal overlay failed: {error}")))
                 .ok();
             if let Some(ref o) = ov {
-                self.telemetry
-                    .excluded_window_ids
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(o.window_number());
-                self.telemetry
-                    .passthrough_window_ids
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(o.window_number());
+                exclude_overlay_window(&self.telemetry, o.window_number());
             }
             ov
         });
@@ -4094,7 +4089,7 @@ impl Render for TargetPickerWindow {
             let kind = match mode {
                 SelectionMode::Area => picker_dim::KIND_AREA,
                 SelectionMode::Window | SelectionMode::Screen => picker_dim::KIND_WINDOW,
-                SelectionMode::Iphone => 3,
+                SelectionMode::Iphone => picker_dim::KIND_PHONE,
             };
             if picker_fade < 1.0 {
                 window.request_animation_frame();

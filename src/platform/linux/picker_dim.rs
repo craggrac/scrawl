@@ -10,6 +10,8 @@ use gpui::{Bounds, FillOptions, FillRule, PathBuilder, PathStyle, Pixels, Point,
 pub const KIND_AREA: u8 = 1;
 /// A window or a whole screen.
 pub const KIND_WINDOW: u8 = 2;
+/// The iPhone mirror: no cutout of its own, so the plain dim.
+pub const KIND_PHONE: u8 = 3;
 
 /// The dim outside the target, at full fade.
 const DIM_ALPHA: f32 = 0.32;
@@ -50,7 +52,7 @@ pub struct DimShape {
     pub border: Option<Border>,
 }
 
-/// The dim for a picker rect of `kind` (`KIND_AREA`, `KIND_WINDOW`) on a screen of `screen`
+/// The dim for a picker rect of `kind` (`KIND_AREA`, `KIND_WINDOW`, `KIND_PHONE`) on a screen of `screen`
 /// points, `fade` (0..=1) into the picker's opening. A rect is clipped to the screen; one
 /// under a pixel on a side is none. Any other kind has no cutout.
 pub fn dim_shape(kind: u8, rect: Option<[f32; 4]>, screen: [f32; 2], fade: f32) -> DimShape {
@@ -299,7 +301,7 @@ mod tests {
         assert_eq!(shape.dim.alpha, 0.32);
         assert_eq!((shape.tint, shape.border), (None, None));
         // A kind with no cutout of its own (the iPhone's) is the same dim.
-        assert_eq!(dim_shape(3, Some([1.0, 1.0, 9.0, 9.0], ), SCREEN, 1.0).cutout, None);
+        assert_eq!(dim_shape(KIND_PHONE, Some([1.0, 1.0, 9.0, 9.0]), SCREEN, 1.0).cutout, None);
     }
 
     #[test]
