@@ -1,4 +1,6 @@
 mod agent_context;
+#[cfg(target_os = "linux")]
+mod agent_send;
 mod audio;
 mod autocrop;
 #[cfg(target_os = "macos")]
@@ -507,6 +509,11 @@ enum Command {
         /// Copy to the macOS clipboard instead of posting to OpenCode.
         #[arg(long)]
         clipboard: bool,
+        /// Linux: send to a coding agent instead of OpenCode: `claude` opens a terminal running
+        /// Claude Code with the capture, `t3` posts it to a T3 Code webhook task (`t3Webhook`).
+        #[cfg(target_os = "linux")]
+        #[arg(long, value_enum, conflicts_with_all = ["session", "reroute", "clipboard"])]
+        to: Option<agent_send::Target>,
     },
     /// Print which OpenCode session a capture of a browser tab would be sent to, without
     /// sending: a page registered through `/sdk.js`, else the project serving a localhost port.
@@ -2259,8 +2266,15 @@ fn main() -> Result<()> {
             session,
             reroute,
             clipboard,
+            #[cfg(target_os = "linux")]
+            to,
         } => {
             let dir = handoff::resolve_bundle_dir(&bundle)?;
+            #[cfg(target_os = "linux")]
+            if let Some(target) = to {
+                println!("{}", agent_send::send(&dir, target)?);
+                return Ok(());
+            }
             if clipboard {
                 handoff::copy_bundle_to_clipboard(&dir)?;
                 println!("Copied {} to clipboard", dir.display());

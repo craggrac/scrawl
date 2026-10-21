@@ -268,7 +268,7 @@ pub struct OpenCodeSessionTime {
     pub archived: Option<u64>,
 }
 
-fn executable(path: &Path) -> bool {
+pub(crate) fn executable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -283,7 +283,7 @@ fn executable(path: &Path) -> bool {
     }
 }
 
-fn on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
             .map(|path| path.join(name))
@@ -343,6 +343,14 @@ pub struct Config {
     /// under `~/.config` (`devContext` looks there itself).
     #[serde(default)]
     pub cdp_port: Option<u16>,
+    /// Linux: which agent the review window's Send button and `scrawl send --to` default to,
+    /// `"claude"` (default) or `"t3"` (`agent_send`). Nothing is sent without a click or a command.
+    #[serde(default)]
+    pub send_target: Option<String>,
+    /// Linux: the URL of the T3 Code scheduled task (webhook trigger) that takes a capture. It
+    /// holds the task's token, so it stays in this file.
+    #[serde(default)]
+    pub t3_webhook: Option<String>,
     /// `"apple"` (default) or `"hex"`: which engine transcribes recordings (`transcribe`).
     #[serde(default)]
     pub transcriber: Option<String>,
@@ -592,6 +600,18 @@ pub fn dev_context() -> bool {
 #[cfg(target_os = "linux")]
 pub fn cdp_port() -> Option<u16> {
     config().cdp_port
+}
+
+/// The agent Send goes to (`sendTarget`) as written, unvalidated.
+#[cfg(target_os = "linux")]
+pub fn send_target() -> Option<String> {
+    config().send_target
+}
+
+/// The T3 Code webhook URL (`t3Webhook`).
+#[cfg(target_os = "linux")]
+pub fn t3_webhook() -> Option<String> {
+    config().t3_webhook.map(|url| url.trim().to_owned()).filter(|url| !url.is_empty())
 }
 
 /// The configured transcriber name (`transcriber`) as written, unvalidated.
