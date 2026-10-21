@@ -15,6 +15,7 @@ mod hex;
 mod hold;
 mod icons;
 mod inbox;
+mod ink;
 mod keyframes;
 #[cfg(target_os = "macos")]
 mod laser_overlay;

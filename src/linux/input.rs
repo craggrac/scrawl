@@ -21,7 +21,7 @@ pub(crate) const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
 const REL_HWHEEL: u16 = 0x06;
 const REL_WHEEL: u16 = 0x08;
-const BTN_LEFT: u16 = 0x110;
+pub(crate) const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const KEY_A: u16 = 30;
 pub(crate) const EV_SYN: u16 = 0x00;
@@ -36,7 +36,7 @@ const KEY_LEFTMETA: u16 = 125;
 const KEY_RIGHTMETA: u16 = 126;
 
 /// A press that moves less than this (points) before it is let go is a click, not a drag.
-const CLICK_SLOP_PT: f64 = 12.0;
+const CLICK_SLOP_PT: f64 = crate::ink::CLICK_SLOP_PT as f64;
 /// Cursor sampling period while a button is held.
 const DRAG_SAMPLE_MS: u64 = 30;
 /// Wheel events closer together than this share one cursor lookup.
