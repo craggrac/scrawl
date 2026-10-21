@@ -149,11 +149,13 @@ const SLIDE_AFTER_MS: i64 = 700;
 
 /// One place to hide for a stretch of the video: `rect` is `[left, top, right, bottom]` as
 /// fractions of the frame, the times are on the video's clock (`u64::MAX` is "to the end").
+/// `solid` fills it with black instead of pixelating it (the big, short places of a slide).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Blur {
     pub rect: [f64; 4],
     pub start_ms: u64,
     pub end_ms: u64,
+    pub solid: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -197,12 +199,13 @@ pub fn plan(
     };
     let on_video = |t: u64| t as i64 - video_offset_ms as i64;
     let mut blurs = Vec::new();
-    let mut push = |rect: [f64; 4], from: i64, to: i64| {
+    let mut push = |rect: [f64; 4], from: i64, to: i64, solid: bool| {
         if to >= 0 {
             blurs.push(Blur {
                 rect,
                 start_ms: from.max(0) as u64,
                 end_ms: if to == i64::MAX { u64::MAX } else { to as u64 },
+                solid,
             });
         }
     };
@@ -217,10 +220,10 @@ pub fn plan(
                 Some(later) => hull(window.rect, later.rect),
                 None => window.rect,
             };
-            push(rect, from, to);
+            push(rect, from, to, false);
         }
         for window in next.iter().filter(|n| !current.iter().any(|c| c.id == n.id)) {
-            push(window.rect, from, to);
+            push(window.rect, from, to, false);
         }
         if let Some(following) = following {
             let changed = current
@@ -233,8 +236,8 @@ pub fn plan(
                     on_video(following.t) - SLIDE_BEFORE_MS,
                     on_video(following.t) + SLIDE_AFTER_MS,
                 );
-                push([0.0, top, 1.0, bottom], from, to);
-                push([left, 0.0, right, 1.0], from, to);
+                push([0.0, top, 1.0, bottom], from, to, true);
+                push([left, 0.0, right, 1.0], from, to, true);
             }
         }
     }
@@ -254,7 +257,9 @@ fn coalesce(mut blurs: Vec<Blur>) -> Vec<Blur> {
     let mut merged: Vec<Blur> = Vec::new();
     for blur in blurs {
         match merged.last_mut() {
-            Some(last) if last.rect == blur.rect && blur.start_ms <= last.end_ms => {
+            Some(last)
+                if last.rect == blur.rect && last.solid == blur.solid && blur.start_ms <= last.end_ms =>
+            {
                 last.end_ms = last.end_ms.max(blur.end_ms);
             }
             _ => merged.push(blur),
@@ -272,6 +277,7 @@ struct Region {
     rect: [u32; 4],
     from: f64,
     to: f64,
+    solid: bool,
 }
 
 fn region(blur: &Blur, (width, height): (u32, u32)) -> Option<Region> {
@@ -287,6 +293,7 @@ fn region(blur: &Blur, (width, height): (u32, u32)) -> Option<Region> {
         rect: [x0, y0, x1 - x0, y1 - y0],
         from: blur.start_ms as f64 / 1000.0,
         to: if blur.end_ms == u64::MAX { 1.0e9 } else { blur.end_ms as f64 / 1000.0 },
+        solid: blur.solid,
     })
 }
 
@@ -344,43 +351,60 @@ fn plan_segments(keyframes: &[f64], regions: &[Region]) -> Vec<Segment> {
     segments
 }
 
-/// More regions than this in one piece are replaced by one box over all of them for the whole
-/// piece: every region costs a copy of the frame.
+/// More pixelated regions than this in one piece are replaced by one box over all of them for
+/// the whole piece: every one costs a copy of the frame.
 const MAX_REGIONS: usize = 16;
 
 /// The `-filter_complex` that pixelates and darkens `regions` (times relative to `origin`) of a
-/// `size` video. Blocks of about 1/45 of the height can't be read back, unlike a gaussian blur.
+/// video `height` pixels tall, and fills the solid ones with black. Blocks of about 1/45 of the
+/// height can't be read back, unlike a gaussian blur.
 fn filter(regions: &[Region], origin: f64, height: u32) -> String {
-    let mut regions = regions.to_vec();
-    if regions.len() > MAX_REGIONS {
-        let all = regions.iter().fold(None, |all: Option<Region>, r| {
+    let (solid, mut windows): (Vec<Region>, Vec<Region>) = regions.iter().partition(|r| r.solid);
+    if windows.len() > MAX_REGIONS {
+        let all = windows.iter().fold(None, |all: Option<Region>, r| {
             Some(all.map_or(*r, |a| {
                 let (x0, y0) = (a.rect[0].min(r.rect[0]), a.rect[1].min(r.rect[1]));
                 let (x1, y1) = (
                     (a.rect[0] + a.rect[2]).max(r.rect[0] + r.rect[2]),
                     (a.rect[1] + a.rect[3]).max(r.rect[1] + r.rect[3]),
                 );
-                Region { rect: [x0, y0, x1 - x0, y1 - y0], from: a.from.min(r.from), to: a.to.max(r.to) }
+                Region {
+                    rect: [x0, y0, x1 - x0, y1 - y0],
+                    from: a.from.min(r.from),
+                    to: a.to.max(r.to),
+                    solid: false,
+                }
             }))
         });
-        regions = all.into_iter().collect();
+        windows = all.into_iter().collect();
     }
+    let when = |r: &Region| format!("enable='between(t,{:.3},{:.3})'", (r.from - origin).max(0.0), r.to - origin);
     let block = (height / 45).max(8);
-    let sources: String = (0..regions.len()).map(|i| format!("[s{i}]")).collect();
-    let mut graph = format!("[0:v]split={}[v0]{sources};", regions.len() + 1);
-    for (i, r) in regions.iter().enumerate() {
+    let mut graph = String::new();
+    let mut last = "0:v".to_owned();
+    if !windows.is_empty() {
+        let sources: String = (0..windows.len()).map(|i| format!("[s{i}]")).collect();
+        graph.push_str(&format!("[0:v]split={}[v0]{sources};", windows.len() + 1));
+        for (i, r) in windows.iter().enumerate() {
+            let [x, y, w, h] = r.rect;
+            graph.push_str(&format!(
+                "[s{i}]crop={w}:{h}:{x}:{y},scale={}:{}:flags=area,scale={w}:{h}:flags=neighbor,\
+                 eq=brightness=-0.25[b{i}];[v{i}][b{i}]overlay={x}:{y}:{}[v{}];",
+                (w / block).max(1),
+                (h / block).max(1),
+                when(r),
+                i + 1,
+            ));
+        }
+        last = format!("v{}", windows.len());
+    }
+    for (i, r) in solid.iter().enumerate() {
         let [x, y, w, h] = r.rect;
-        let (a, b) = ((r.from - origin).max(0.0), r.to - origin);
-        graph.push_str(&format!(
-            "[s{i}]crop={w}:{h}:{x}:{y},scale={}:{}:flags=area,scale={w}:{h}:flags=neighbor,\
-             eq=brightness=-0.25[b{i}];[v{i}][b{i}]overlay={x}:{y}:enable='between(t,{a:.3},{b:.3})'[{}];",
-            (w / block).max(1),
-            (h / block).max(1),
-            if i + 1 == regions.len() { "out".to_owned() } else { format!("v{}", i + 1) },
-        ));
+        graph.push_str(&format!("[{last}]drawbox={x}:{y}:{w}:{h}:black@1:t=fill:{}[d{i}];", when(r)));
+        last = format!("d{i}");
     }
     graph.pop();
-    graph
+    graph.replace(&format!("[{last}]"), "[out]")
 }
 
 /// The packets of the video track: their times (seconds) and which of them are keyframes.
@@ -683,7 +707,7 @@ mod tests {
         let blurs = plan(&log, &pass(), frame(), 0);
         assert_eq!(
             blurs,
-            [Blur { rect: [0.092, 0.084, 0.308, 0.316], start_ms: 0, end_ms: u64::MAX }]
+            [Blur { rect: [0.092, 0.084, 0.308, 0.316], start_ms: 0, end_ms: u64::MAX, solid: false }]
         );
     }
 
@@ -728,6 +752,7 @@ mod tests {
         let blurs = plan(&log, &pass(), frame(), 0);
         let row = blurs.iter().find(|b| b.rect[0] == 0.0 && b.rect[2] == 1.0).unwrap();
         let column = blurs.iter().find(|b| b.rect[1] == 0.0 && b.rect[3] == 1.0).unwrap();
+        assert!(row.solid && column.solid);
         assert_eq!((row.start_ms, row.end_ms), (1_850, 2_700));
         assert_eq!((column.start_ms, column.end_ms), (1_850, 2_700));
         assert_eq!((row.rect[1], row.rect[3]), (0.384, 0.616));
@@ -754,16 +779,16 @@ mod tests {
 
     #[test]
     fn regions_are_even_pixels_inside_the_frame() {
-        let blur = Blur { rect: [0.0015, 0.0, 0.5003, 1.0], start_ms: 500, end_ms: u64::MAX };
+        let blur = Blur { rect: [0.0015, 0.0, 0.5003, 1.0], start_ms: 500, end_ms: u64::MAX, solid: false };
         let r = region(&blur, (1920, 1080)).unwrap();
         assert_eq!(r.rect, [2, 0, 960, 1080]);
         assert_eq!((r.from, r.to), (0.5, 1.0e9));
-        let off = Blur { rect: [0.5, 0.5, 0.5, 0.9], start_ms: 0, end_ms: 1 };
+        let off = Blur { rect: [0.5, 0.5, 0.5, 0.9], start_ms: 0, end_ms: 1, solid: false };
         assert!(region(&off, (1920, 1080)).is_none());
     }
 
     fn at(from: f64, to: f64) -> Region {
-        Region { rect: [0, 0, 10, 10], from, to }
+        Region { rect: [0, 0, 10, 10], from, to, solid: false }
     }
 
     #[test]
@@ -800,14 +825,20 @@ mod tests {
 
     #[test]
     fn the_filter_enables_each_region_in_its_pieces_time() {
-        let region = Region { rect: [152, 82, 216, 136], from: 2.7, to: 8.3 };
+        let region = Region { rect: [152, 82, 216, 136], from: 2.7, to: 8.3, solid: false };
         let graph = filter(&[region], 2.0, 360);
         assert!(graph.starts_with("[0:v]split=2[v0][s0];[s0]crop=216:136:152:82,scale=27:17:flags=area"), "{graph}");
         assert!(graph.contains("overlay=152:82:enable='between(t,0.700,6.300)'[out]"), "{graph}");
-        let many: Vec<Region> = (0..40).map(|i| Region { rect: [i * 4, 0, 4, 4], from: f64::from(i), to: 50.0 }).collect();
+        let many: Vec<Region> = (0..40).map(|i| Region { rect: [i * 4, 0, 4, 4], from: f64::from(i), to: 50.0, solid: false }).collect();
         let graph = filter(&many, 0.0, 1080);
         assert!(graph.starts_with("[0:v]split=2[v0][s0];[s0]crop=160:4:0:0"), "{graph}");
         assert!(graph.contains("between(t,0.000,50.000)"), "{graph}");
+        // Solid places are only a box drawn, with no copy of the frame.
+        let band = Region { rect: [0, 242, 1920, 616], from: 5.0, to: 6.0, solid: true };
+        let graph = filter(&[band], 4.0, 1080);
+        assert_eq!(graph, "[0:v]drawbox=0:242:1920:616:black@1:t=fill:enable='between(t,1.000,2.000)'[out]");
+        let both = filter(&[region, band], 2.0, 360);
+        assert!(both.contains("[v1]drawbox=0:242:1920:616:black@1:t=fill:enable='between(t,3.000,4.000)'[out]"), "{both}");
     }
 
     // MARK: With ffmpeg
@@ -907,6 +938,10 @@ mod tests {
         let later = gray(&video, 7.0167);
         assert!(blocky(&later, 160, 170, 4));
         assert!(mean_difference(&later, &gray(&original, 7.0167), 160..352, 170..202) > 30.0);
+        // The window left at 8 s: for the slide its whole row is black for a moment.
+        let sliding = gray(&video, 8.2167);
+        assert!(sliding[150 * W + 20] < 24 && sliding[150 * W + 600] < 24);
+        assert!(gray(&original, 8.2167)[150 * W + 20] > 60);
         assert_eq!(media::probe(&video).unwrap().audio_tracks, 1);
         assert_eq!(packets(&video).unwrap().0, packets(&original).unwrap().0);
         assert!(!video.with_extension("redacting.mp4").exists());
@@ -942,7 +977,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let video = dir.join("recording.mp4");
         std::fs::write(&video, b"not a movie").unwrap();
-        let blur = Blur { rect: [0.0, 0.0, 0.5, 0.5], start_ms: 0, end_ms: u64::MAX };
+        let blur = Blur { rect: [0.0, 0.0, 0.5, 0.5], start_ms: 0, end_ms: u64::MAX, solid: false };
         assert_eq!(Redaction { blurs: vec![blur] }.apply(Some(&video)), None);
         assert!(!video.exists());
         std::fs::remove_dir_all(dir).unwrap();
