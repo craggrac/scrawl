@@ -196,15 +196,6 @@ fn to_yuv(range: &str) -> String {
     )
 }
 
-fn lossy_input(command: &mut Command, path: &Path) {
-    let mut url = OsString::from("file:");
-    url.push(path);
-    command
-        .args(["-protocol_whitelist", "file"])
-        .arg("-i")
-        .arg(url);
-}
-
 fn base(command: &mut Command) {
     command.args(["-v", "error", "-nostdin", "-hide_banner", "-y"]);
 }
@@ -240,7 +231,19 @@ fn audio_input(command: &mut Command, plan: &Plan) -> bool {
     command
         .args(["-ss", &seconds(plan.audio_start_ms)])
         .args(["-t", &seconds(plan.audio_length_ms)]);
-    lossy_input(command, audio);
+    if audio == plan.video {
+        // An iPhone movie's own track: the same locked-down input as the video.
+        crate::linux::media::input(command, audio);
+    } else {
+        // `audio.wav`: only the local file protocol and the WAV demuxer, so a file that is really
+        // a playlist (concat, HLS) can't make ffmpeg read others.
+        let mut url = OsString::from("file:");
+        url.push(audio);
+        command
+            .args(["-protocol_whitelist", "file", "-f", "wav"])
+            .arg("-i")
+            .arg(url);
+    }
     true
 }
 
@@ -870,6 +873,26 @@ mod tests {
         p.codec = "hevc";
         let hevc = args(&direct_command(&p, &SourceColor::default())).join(" ");
         assert!(hevc.contains("libx265") && hevc.contains("hvc1"), "{hevc}");
+    }
+
+    #[test]
+    fn the_audio_input_is_a_locked_down_wav_unless_it_is_the_movie() {
+        let ink = InkPlan::default();
+        let out = PathBuf::from("/o.mp4");
+        let wav = PathBuf::from("/b/audio.wav");
+        let mut p = plan(&ink, &out);
+        p.audio = Some(&wav);
+        p.audio_length_ms = 1_000;
+        let joined = args(&direct_command(&p, &SourceColor::default())).join(" ");
+        assert!(
+            joined.contains("-protocol_whitelist file -f wav -i file:/b/audio.wav"),
+            "{joined}"
+        );
+        // The movie's own audio goes through the same whitelist as the video.
+        p.audio = Some(p.video);
+        let movie = args(&direct_command(&p, &SourceColor::default())).join(" ");
+        assert!(!movie.contains("-f wav"), "{movie}");
+        assert_eq!(movie.matches("-format_whitelist").count(), 2, "{movie}");
     }
 
     #[test]

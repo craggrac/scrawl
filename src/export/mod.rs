@@ -115,6 +115,7 @@ pub(crate) struct Plan<'a> {
     pub ink: &'a ink::InkPlan,
     /// The recording's own size in pixels (the Linux renderer needs it to crop and sample).
     #[serde(skip)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub video_px: (u32, u32),
 }
 
@@ -218,7 +219,7 @@ pub fn export(
     progress: &mut dyn FnMut(f32),
 ) -> Result<Exported> {
     let video = match &bundle.video {
-        Some(name) => dir.join(name),
+        Some(name) => member(dir, name)?,
         None => dir.join("recording.mp4"),
     };
     if !video.is_file() {
@@ -251,11 +252,11 @@ pub fn export(
     // The audio: an iPhone movie's own track (full quality, on the movie's clock), else
     // `audio.wav`, which Scrawl records from the bundle's start, `video_offset_ms` before the
     // video's.
-    let wav = bundle
-        .audio
-        .as_ref()
-        .map(|name| dir.join(name))
-        .filter(|p| p.is_file());
+    let wav = match &bundle.audio {
+        Some(name) => Some(member(dir, name)?),
+        None => None,
+    }
+    .filter(|p| p.is_file());
     let (audio, audio_start, audio_length) =
         if bundle.source.as_deref() == Some("iphone") && probe.audio_tracks > 0 {
             (Some(video.clone()), 0, probe.duration_ms)
@@ -337,6 +338,20 @@ pub fn export(
         camera_moves: camera.is_some(),
         bytes: done.bytes,
     })
+}
+
+/// A file the manifest names, inside the bundle: a plain relative path, so a crafted manifest
+/// can't point the renderer at some other file on the machine.
+fn member(dir: &Path, name: &str) -> Result<PathBuf> {
+    let relative = Path::new(name);
+    ensure!(
+        !name.is_empty()
+            && relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))),
+        "The bundle names a file outside itself: {name}"
+    );
+    Ok(dir.join(relative))
 }
 
 fn wav_duration_ms(path: &Path) -> Result<u64> {
@@ -492,6 +507,16 @@ mod tests {
         let keys = camera_rows(&b, [0.0, 0.0, 1.0, 1.0], (2560, 1440), 15_000);
         assert!(keys.iter().any(|k| k.rect[2] - k.rect[0] < 0.6), "zooms in");
         assert_eq!(keys.last().unwrap().rect, [0.0, 0.0, 1.0, 1.0], "ends wide");
+    }
+
+    #[test]
+    fn manifest_file_names_must_stay_inside_the_bundle() {
+        let dir = Path::new("/b/x.scrawl");
+        assert_eq!(member(dir, "audio.wav").unwrap(), dir.join("audio.wav"));
+        assert_eq!(member(dir, "media/a.mp4").unwrap(), dir.join("media/a.mp4"));
+        for bad in ["/etc/passwd", "../other/audio.wav", "a/../../b", "", ".", "a/.."] {
+            assert!(member(dir, bad).is_err(), "{bad}");
+        }
     }
 
     #[cfg(target_os = "macos")]
