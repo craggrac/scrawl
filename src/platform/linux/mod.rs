@@ -25,6 +25,7 @@ pub use self::standins::{NativePill, PhoneSession, PillAction};
 pub use self::telemetry::SharedCaptureTelemetry;
 use crate::capture::scrawl_log;
 pub use crate::capture::{selectable_window_at, shortcut_parts};
+pub use crate::linux::context::Collector as ContextCollector;
 pub use crate::linux::hypr::{
     WindowLogger, frontmost_app_info, list_selectable_windows,
     target_under_point as discover_target_at,

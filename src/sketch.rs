@@ -720,6 +720,17 @@ pub fn summary_markdown_with(
     } else if !bundle.transcript.text.trim().is_empty() {
         out.push_str(&format!("“{}”\n", bundle.transcript.text.trim()));
     }
+    // The browser tab's errors and the repository: only what was collected (`dev_context`).
+    let home = dirs::home_dir();
+    let dev = bundle
+        .dev_context
+        .summary_lines(home.as_deref().and_then(|h| h.to_str()));
+    if !dev.is_empty() {
+        out.push_str("Context:\n");
+        for line in dev {
+            out.push_str(&format!("· {line}\n"));
+        }
+    }
     out
 }
 
@@ -1575,6 +1586,7 @@ mod tests {
             cursor: Vec::new(),
             autocrop: None,
             destination: None,
+            dev_context: Default::default(),
         };
         let tl = timeline(&bundle).join("\n");
         assert!(tl.find("0:03 “").unwrap() < tl.find("0:04 · pressed").unwrap());
@@ -1780,5 +1792,62 @@ mod tests {
         assert!(summary.starts_with(
             "[scrawl 0:25 · iPhone · OpenCode (354) · /recordings/phone]\n- #1 (0:01) “So here.”\n"
         ));
+    }
+
+    #[test]
+    fn summary_ends_with_the_collected_browser_and_repository_context() {
+        use crate::dev_context::{ConsoleEntry, DevContext, NetworkFailure, PageVisit, Project};
+        let mut bundle: ScrawlBundle = serde_json::from_value(serde_json::json!({
+            "version": 1, "id": "t", "createdAtMs": 0, "durationMs": 25_000,
+            "target": {"mode": "display", "displayId": 0,
+                "frame": {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0, "scale": 1.0}},
+            "transcript": {"source": "test", "text": "Look at this.", "segments": []},
+            "strokes": [], "marks": [], "events": [], "keyframes": [], "contactSheet": "c.png"
+        }))
+        .unwrap();
+        let dir = std::path::Path::new("/recordings/x");
+        // Nothing collected: no section.
+        assert!(!summary_markdown(&bundle, dir).contains("Context:"));
+        bundle.dev_context = DevContext {
+            pages: vec![PageVisit {
+                t: 0,
+                url: "http://localhost:3000/".into(),
+            }],
+            console: vec![ConsoleEntry {
+                t: 7_000,
+                level: "error".into(),
+                text: "TypeError: x".into(),
+                at: None,
+                count: 1,
+            }],
+            network: vec![NetworkFailure {
+                t: 9_000,
+                method: "POST".into(),
+                url: "http://localhost:3000/api/x".into(),
+                status: Some(500),
+                error: None,
+                count: 1,
+            }],
+            projects: vec![Project {
+                t: 0,
+                dir: "/w/scrawl".into(),
+                source: "terminal".into(),
+                root: Some("/w/scrawl".into()),
+                branch: Some("main".into()),
+                head: None,
+                subject: None,
+                changed: Some(0),
+                files: Vec::new(),
+            }],
+        };
+        assert_eq!(
+            summary_markdown(&bundle, dir),
+            "[scrawl 0:25 · Display · /recordings/x]\n“Look at this.”\n\
+             Context:\n\
+             · 0:00 page localhost:3000/\n\
+             · 0:07 console error: TypeError: x\n\
+             · 0:09 POST /api/x → 500\n\
+             · repo scrawl @ main (clean)\n"
+        );
     }
 }

@@ -546,6 +546,9 @@ pub struct View {
     #[cfg(target_os = "linux")]
     pub parakeet: ParakeetView,
     pub video_export: bool,
+    /// Linux: whether recordings collect the browser tab's errors and the repository.
+    #[cfg(target_os = "linux")]
+    pub dev_context: bool,
     #[cfg(target_os = "macos")]
     pub retention: RetentionView,
     /// How much the captures folder takes, once measured.
@@ -1089,6 +1092,8 @@ impl Panel {
                 }
             }
             ("autoSend" | "videoExport", serde_json::Value::Bool(on)) => write(key, (*on).into()),
+            #[cfg(target_os = "linux")]
+            ("devContext", serde_json::Value::Bool(on)) => write(key, (*on).into()),
             ("microphone", serde_json::Value::String(id)) => {
                 let inputs = self.inputs.clone().unwrap_or_default();
                 if let Err(error) = crate::mic::save_in(&path, id, &inputs) {
@@ -1227,6 +1232,8 @@ impl Panel {
             #[cfg(target_os = "linux")]
             parakeet: parakeet_view(),
             video_export: config.video_export.unwrap_or(false),
+            #[cfg(target_os = "linux")]
+            dev_context: config.dev_context.unwrap_or(false),
             #[cfg(target_os = "macos")]
             retention: RetentionView {
                 preset: policy.preset().map(preset_id),
@@ -1934,6 +1941,24 @@ mod tests {
         set(&mut panel, &mut host, "retention", "forever".into());
         // "Forever" says it all; no caption.
         assert_eq!(panel.view(&host).retention.note, "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_dev_context_switch_writes_its_key_and_defaults_off() {
+        let dir = TempDir::new("devctx");
+        let mut host = fake(&dir);
+        let mut panel = Panel::default();
+        assert!(!panel.view(&host).dev_context);
+        panel.on(
+            Action::Set {
+                key: "devContext".into(),
+                value: true.into(),
+            },
+            &mut host,
+        );
+        assert!(panel.view(&host).dev_context);
+        assert_eq!(read_json(&host.path)["devContext"], true);
     }
 
     #[test]

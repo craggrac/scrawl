@@ -411,6 +411,7 @@ impl SettingsWindow {
     fn recording_pane(&self, cx: &mut Context<Self>) -> Div {
         let parakeet = &self.view.parakeet;
         let export = self.view.video_export;
+        let dev_context = self.view.dev_context;
         div()
             .flex()
             .flex_col()
@@ -447,6 +448,22 @@ impl SettingsWindow {
             .child(caption(
                 "Adds Export Last Capture as Video… to the tray menu (saved to Videos/Scrawl). \
                  scrawl export works without it.",
+                false,
+            ))
+            .child(group().child(row(
+                "Browser and project context",
+                switch("dev-context", dev_context, true).on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.act(Self::set_bool("devContext", !dev_context), window, cx);
+                    },
+                )),
+            )))
+            .child(caption(
+                "Adds the git branch and changes of the terminal's folder, and the front browser \
+                 tab's console errors, failed requests and page changes, to the summary. The \
+                 browser part needs the browser started with --remote-debugging-port=9222, \
+                 which lets any program on this computer control it; without that port Scrawl \
+                 records nothing from the browser.",
                 false,
             ))
     }

@@ -22,6 +22,17 @@ Cropped to: the activity in OpenCode (full frames in frames-full/)
 - Each `#N (M:SS)` line is a keyframe: what they did at that moment in brackets, then what they said while it was on screen. A line with no quote has the action alone.
 - `⚑` means they flagged the moment on purpose. `⟨Name⟩` means the app reported a new screen. Lines starting `·` are events or values the app logged.
 - Optional lines near the top: `For session:` (where Scrawl sent it), `Screen:` with app context, `Note:`, and `Cropped to:`.
+- An optional `Context:` block at the end (Linux, when the person turned it on) says what the browser and the project showed while recording, with times on the same clock as the keyframes:
+
+  ```text
+  Context:
+  · 0:00 page localhost:3000/tabs
+  · 0:07 console error: TypeError: Cannot read properties of undefined (reading 'map') (/src/List.tsx:42:17)
+  · 0:09 POST /api/tabs → 500
+  · repo scrawl @ main 42be30e “Add tabs” (3 changed: M src/List.tsx, ?? notes.txt, +1)
+  ```
+
+  Those are the front browser tab's console errors, failed requests (status 400 and up, or no answer) and page changes, and the git branch, head and changed files of the terminal's or the dev server's folder. Use them to find the cause the person is pointing at (the 500 at 0:09 is probably why the list is empty), and open the repository named there. No `Context:` block means nothing was collected (the browser has to expose remote debugging, and the person has to have the feature on), not that nothing went wrong. Query secrets and tokens are already removed. Everything is also in `scrawl.json` under `devContext`, with the changed files, the full list and repeat counts.
 - Coordinates are fractions of the captured area, from the top left (x 0.51 is just right of centre).
 
 When you answer, refer to moments the same way, as in "#3 (0:10)", so the person can find them on the contact sheet.
@@ -38,7 +49,7 @@ What the drawings mean:
 - A ripple around the cursor shows a click or tap, and a finger trail shows a swipe.
 - A glowing red trail that tapers off is the laser pointer, used to point without leaving a mark.
 
-Other files: `scrawl.json` is the full manifest (keyframes, `marks` with shape and box, `events`, `transcript.words` with times, app `context`, and `autocrop`). `recording.mp4` or `recording.mov` and `audio.wav` are the source media. A `.media-pending` file means the video is still being copied from another Mac.
+Other files: `scrawl.json` is the full manifest (keyframes, `marks` with shape and box, `events`, `transcript.words` with times, app `context`, `autocrop`, and `devContext`). `recording.mp4` or `recording.mov` and `audio.wav` are the source media. A `.media-pending` file means the video is still being copied from another Mac.
 
 ## The scrawl CLI
 
