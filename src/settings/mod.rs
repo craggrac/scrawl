@@ -549,6 +549,9 @@ pub struct View {
     /// Linux: whether recordings collect the browser tab's errors and the repository.
     #[cfg(target_os = "linux")]
     pub dev_context: bool,
+    /// The Linux replay buffer (`replayBuffer`).
+    #[cfg(target_os = "linux")]
+    pub replay_buffer: bool,
     #[cfg(target_os = "macos")]
     pub retention: RetentionView,
     /// How much the captures folder takes, once measured.
@@ -854,7 +857,7 @@ fn shortcut_view(
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum Action {
-    /// A toggle or popup: `launchAtLogin`, `autoSend`, `videoExport` (bool), `microphone`
+    /// A toggle or popup: `launchAtLogin`, `autoSend`, `videoExport`, `replayBuffer` (bool), `microphone`
     /// ("default" or a device id), `transcriber` ("apple"/"hex"), `hexModel` (an id),
     /// `retention` (a preset id).
     Set {
@@ -1100,6 +1103,8 @@ impl Panel {
                     write(key, target.name().into());
                 }
             }
+            #[cfg(target_os = "linux")]
+            ("replayBuffer", serde_json::Value::Bool(on)) => write(key, (*on).into()),
             ("microphone", serde_json::Value::String(id)) => {
                 let inputs = self.inputs.clone().unwrap_or_default();
                 if let Err(error) = crate::mic::save_in(&path, id, &inputs) {
@@ -1240,6 +1245,8 @@ impl Panel {
             video_export: config.video_export.unwrap_or(false),
             #[cfg(target_os = "linux")]
             dev_context: config.dev_context.unwrap_or(false),
+            #[cfg(target_os = "linux")]
+            replay_buffer: config.replay_buffer.unwrap_or(false),
             #[cfg(target_os = "macos")]
             retention: RetentionView {
                 preset: policy.preset().map(preset_id),

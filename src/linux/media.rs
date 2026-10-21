@@ -416,6 +416,34 @@ pub fn export_audio(movie: &Path, wav: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copies the video of `joined`, whole MPEG-TS segments of the replay buffer laid end to end,
+/// into the mp4 `out` without re-encoding, so that `skip` into it becomes the movie's start. The
+/// segments begin on key frames and the recorder writes no B-frames, so the cut is made on the
+/// timestamps: the key frame the segment starts with stays the first picture, and packets
+/// before `skip` are squeezed into the first milliseconds (earlier ones can't be dropped, the
+/// later ones depend on them), so the screen at `skip` is what the movie opens on, even when it
+/// stayed still for minutes (the recorder only writes when the screen changes).
+pub fn clip_segments(joined: &Path, skip: Duration, out: &Path) -> Result<()> {
+    let skip = skip.as_secs_f64();
+    // Quoted: a bitstream filter chain is split on commas, the expressions have them.
+    let shift = |t: &str| format!("'max({t}-STARTPTS-{skip}/TB,N*0.001/TB)'");
+    let mut url = OsString::from("file:");
+    url.push(joined);
+    let mut command = Command::new("ffmpeg");
+    command
+        .args(["-v", "error", "-nostdin", "-y"])
+        .args(["-protocol_whitelist", "file", "-format_whitelist", "mpegts"])
+        .args(["-f", "mpegts", "-i"])
+        .arg(url)
+        .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-c:v", "copy"])
+        .arg("-bsf:v")
+        .arg(format!("setts=pts={}:dts={}", shift("PTS"), shift("DTS")))
+        .args(["-movflags", "+faststart"])
+        .arg(out);
+    run(command, "ffmpeg (replay clip)", Duration::from_secs(60))?;
+    Ok(())
+}
+
 /// Re-encodes `movie` into `out` as HEVC with its long edge at most `max_edge` and the audio
 /// copied, at the lowest CPU priority.
 pub fn shrink(movie: &Path, out: &Path, max_edge: u32) -> Result<Shrunk> {

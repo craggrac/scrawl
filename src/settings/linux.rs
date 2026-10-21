@@ -557,6 +557,23 @@ mod tests {
     }
 
     #[test]
+    fn the_replay_buffer_switch_is_off_until_turned_on_and_written_under_its_key() {
+        let dir = TempDir::new("replay");
+        let mut host = fake(&dir);
+        let mut panel = Panel::default();
+        assert!(!panel.view(&host).replay_buffer);
+        panel.on(
+            Action::Set {
+                key: "replayBuffer".to_owned(),
+                value: true.into(),
+            },
+            &mut host,
+        );
+        assert_eq!(config(&host)["replayBuffer"], true);
+        assert!(panel.view(&host).replay_buffer);
+    }
+
+    #[test]
     fn the_size_and_the_folder_are_the_panels_to_say() {
         let dir = TempDir::new("size");
         let host = fake(&dir);

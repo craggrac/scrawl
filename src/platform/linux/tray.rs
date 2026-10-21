@@ -1,5 +1,6 @@
 //! The tray icon (StatusNotifierItem, through `ksni`), the Linux status menu: Record or Stop,
-//! Open Latest Capture, Export Last Capture as Video… (when `videoExport` is on), Settings, Quit. It
+//! Open Latest Capture, Export Last Capture as Video… (when `videoExport` is on), Save Last
+//! 30 s (when `replayBuffer` is on), Settings, Quit. It
 //! needs a tray host on the bar (waybar's `tray`, Noctalia's);
 //! without one Scrawl logs that once and runs without it.
 
@@ -17,11 +18,19 @@ pub enum TrayItem {
     OpenLatest,
     Settings,
     ExportVideo,
+    /// Save the replay buffer.
+    SaveReplay,
     Quit,
 }
 
-/// The menu's rows for the state: (label, item). `export` is the `videoExport` setting.
-pub fn rows(recording: bool, shortcut: &str, export: bool) -> Vec<(String, TrayItem)> {
+/// The menu's rows for the state: (label, item). `export` is the `videoExport` setting and
+/// `replay` the replay buffer's window in seconds when it is on.
+pub fn rows(
+    recording: bool,
+    shortcut: &str,
+    export: bool,
+    replay: Option<u64>,
+) -> Vec<(String, TrayItem)> {
     let record = if recording {
         "Stop Recording"
     } else {
@@ -36,6 +45,9 @@ pub fn rows(recording: bool, shortcut: &str, export: bool) -> Vec<(String, TrayI
             "Export Last Capture as Video…".to_owned(),
             TrayItem::ExportVideo,
         ));
+    }
+    if let Some(seconds) = replay {
+        rows.push((format!("Save Last {seconds} s"), TrayItem::SaveReplay));
     }
     rows.push(("Settings…".to_owned(), TrayItem::Settings));
     rows.push(("Quit Scrawl".to_owned(), TrayItem::Quit));
@@ -113,7 +125,13 @@ impl ksni::Tray for ScrawlTray {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         let mut menu = Vec::new();
-        for (label, item) in rows(self.recording, &self.shortcut, crate::handoff::video_export()) {
+        let replay = crate::linux::replay::configured();
+        for (label, item) in rows(
+            self.recording,
+            &self.shortcut,
+            crate::handoff::video_export(),
+            replay,
+        ) {
             if item == TrayItem::Quit {
                 menu.push(ksni::MenuItem::Separator);
             }
@@ -212,7 +230,7 @@ mod tests {
 
     #[test]
     fn the_menu_follows_the_recording() {
-        let idle = rows(false, "⌥⇧S", false);
+        let idle = rows(false, "⌥⇧S", false, None);
         assert_eq!(idle[0], ("Record Screen  ⌥⇧S".to_owned(), TrayItem::Record));
         assert_eq!(idle[1].1, TrayItem::OpenLatest);
         assert_eq!(idle[2], ("Settings…".to_owned(), TrayItem::Settings));
@@ -220,7 +238,7 @@ mod tests {
             idle.last().unwrap(),
             &("Quit Scrawl".to_owned(), TrayItem::Quit)
         );
-        let recording = rows(true, "⌥⇧S", false);
+        let recording = rows(true, "⌥⇧S", false, None);
         assert_eq!(
             recording[0],
             ("Stop Recording  ⌥⇧S".to_owned(), TrayItem::Record)
@@ -230,11 +248,20 @@ mod tests {
 
     #[test]
     fn the_export_row_is_there_only_when_the_setting_is_on() {
-        let with = rows(false, "⌥⇧S", true);
-        assert_eq!(with.len(), rows(false, "⌥⇧S", false).len() + 1);
+        let with = rows(false, "⌥⇧S", true, None);
+        assert_eq!(with.len(), rows(false, "⌥⇧S", false, None).len() + 1);
         let at = with.iter().position(|r| r.1 == TrayItem::ExportVideo).unwrap();
         assert_eq!(with[at].0, "Export Last Capture as Video…");
         assert_eq!(with.last().unwrap().1, TrayItem::Quit);
+    }
+
+    #[test]
+    fn the_replay_row_names_the_window_and_sits_before_settings() {
+        let with = rows(false, "⌥⇧S", false, Some(30));
+        let at = with.iter().position(|r| r.1 == TrayItem::SaveReplay).unwrap();
+        assert_eq!(with[at].0, "Save Last 30 s");
+        assert_eq!(with[at + 1].1, TrayItem::Settings);
+        assert_eq!(with.len(), rows(false, "⌥⇧S", false, None).len() + 1);
     }
 
     fn pixel(data: &[u8], size: i32, x: i32, y: i32) -> [u8; 4] {

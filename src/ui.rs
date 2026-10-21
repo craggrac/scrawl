@@ -5711,6 +5711,7 @@ fn start_linux_app(
             Command::Cancel => MenuAction::Cancel,
             Command::Review => MenuAction::OpenLatest,
             Command::Settings => MenuAction::Settings,
+            Command::Replay => return crate::linux::replay::save_in_background(),
             Command::Quit => MenuAction::Quit,
         };
         socket_tx
@@ -5724,13 +5725,20 @@ fn start_linux_app(
         .label
         .clone();
     let tray = Tray::start(shortcut, move |item| {
-        let _ = menu_tx.send(match item {
+        let action = match item {
             TrayItem::Record => MenuAction::ToggleCapture,
             TrayItem::OpenLatest => MenuAction::OpenLatest,
             TrayItem::Settings => MenuAction::Settings,
             TrayItem::ExportVideo => MenuAction::ExportVideo,
+            TrayItem::SaveReplay => {
+                if let Err(why) = crate::linux::replay::save_in_background() {
+                    crate::linux::notify(&format!("Replay not saved: {why}"));
+                }
+                return;
+            }
             TrayItem::Quit => MenuAction::Quit,
-        });
+        };
+        let _ = menu_tx.send(action);
     });
     (menu_rx, tray)
 }
@@ -5879,6 +5887,7 @@ pub fn run_app(
             Some((listener, instance)) => {
                 open_keep_alive_window(cx);
                 let (menu_rx, tray) = start_linux_app(listener, &telemetry);
+                crate::linux::replay::start();
                 (Some(instance), Some(menu_rx), Some(tray))
             }
             None => (None, None, None),
@@ -5934,6 +5943,7 @@ pub fn run_app(
                         // A recording is thrown away and its recorder stopped first, or
                         // `wf-recorder` would outlive the app.
                         scrawl_log("Quitting");
+                        crate::linux::replay::shutdown();
                         loop_coord.update(cx, |coord, cx| {
                             coord.switcher.reset();
                             if coord.is_recording() || coord.is_selecting() {
@@ -5945,6 +5955,8 @@ pub fn run_app(
                     if let Some(tray) = tray.as_mut() {
                         let coord = loop_coord.read(cx);
                         tray.set_recording(coord.is_recording());
+                        // The replay buffer is off while a recording runs.
+                        crate::linux::replay::set_recording(coord.is_recording());
                         tray.set_shortcut(
                             &coord
                                 .telemetry
@@ -5981,7 +5993,8 @@ pub fn run_app(
                     }
                 });
                 if quitting.is_some_and(|since| {
-                    !crate::platform::recorders_running() || since.elapsed() >= QUIT_WAIT
+                    (!crate::platform::recorders_running() && !crate::linux::replay::running())
+                        || since.elapsed() >= QUIT_WAIT
                 }) {
                     if let Some(instance) = &instance {
                         instance.remove_socket();

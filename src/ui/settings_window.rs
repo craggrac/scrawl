@@ -436,6 +436,7 @@ impl SettingsWindow {
         let parakeet = &self.view.parakeet;
         let export = self.view.video_export;
         let dev_context = self.view.dev_context;
+        let replay = self.view.replay_buffer;
         div()
             .flex()
             .flex_col()
@@ -488,6 +489,21 @@ impl SettingsWindow {
                  browser part needs the browser started with --remote-debugging-port=9222, \
                  which lets any program on this computer control it; without that port Scrawl \
                  records nothing from the browser.",
+                false,
+            ))
+            .child(group().child(row(
+                "Replay buffer",
+                switch("replay-buffer", replay, true).on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.act(Self::set_bool("replayBuffer", !replay), window, cx);
+                    },
+                )),
+            )))
+            .child(caption(
+                "Keeps the last 30 s of the screen and the microphone in memory so scrawl replay \
+                 (or Save Last 30 s in the tray) can save what just happened. The microphone is \
+                 recording the whole time Scrawl runs, and the shell's privacy indicator does not \
+                 show it. Paused during recordings and while the screen is locked.",
                 false,
             ))
     }

@@ -106,11 +106,8 @@ fn urgent_frame_cap(frame_bytes: usize) -> usize {
     (CANDIDATE_BUDGET_BYTES / 4 / frame_bytes.max(1)).max(1)
 }
 
-fn spawn(target: &TargetInfo, video: &Path, codec: &str) -> Result<Child> {
-    // A file left by an earlier attempt would pass the first-frame check.
-    let _ = std::fs::remove_file(video);
-    let mut command = Command::new("wf-recorder");
-    command.args(["-y", "-c", codec]).arg("-f").arg(video);
+/// Points `command` (a `wf-recorder`) at the target's output, or its area for a window or region.
+pub(super) fn select_area(command: &mut Command, target: &TargetInfo) {
     match target.mode {
         CaptureMode::Window | CaptureMode::Region => {
             command.args(["-g", &geometry(target.frame)]);
@@ -126,6 +123,14 @@ fn spawn(target: &TargetInfo, video: &Path, codec: &str) -> Result<Child> {
             }
         }
     }
+}
+
+fn spawn(target: &TargetInfo, video: &Path, codec: &str) -> Result<Child> {
+    // A file left by an earlier attempt would pass the first-frame check.
+    let _ = std::fs::remove_file(video);
+    let mut command = Command::new("wf-recorder");
+    command.args(["-y", "-c", codec]).arg("-f").arg(video);
+    select_area(&mut command, target);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -164,7 +169,7 @@ fn retry_on_x264(error: &anyhow::Error) -> bool {
 /// Waits for the first bytes and returns their capture-clock time in ms; `Err` with
 /// wf-recorder's complaint if it quit instead. On a screen that stays silent for
 /// `FIRST_FRAME_WAIT` it returns the time the recorder was started.
-fn wait_for_first_frame(
+pub(super) fn wait_for_first_frame(
     child: &mut Child,
     video: &Path,
     started_at: Instant,
@@ -196,7 +201,7 @@ fn wait_for_first_frame(
 }
 
 /// Ends a recorder: SIGINT lets it finish the file; after `STOP_WAIT` it is killed.
-fn terminate(child: &mut Child) -> Result<ExitStatus> {
+pub(super) fn terminate(child: &mut Child) -> Result<ExitStatus> {
     if let Some(status) = child.try_wait()? {
         return Ok(status);
     }

@@ -58,7 +58,7 @@ end)
 (or `exec-once = scrawl app` in a `hyprland.conf`). While it runs, the same `scrawl toggle` bind
 drives it instead of starting a separate recorder, and a second `scrawl app` exits with a message.
 It listens on `$XDG_RUNTIME_DIR/scrawl/ctl.sock` (owner-only); `toggle`, `stop`, `cancel`, `review`,
-`settings` and `quit` are its commands, one per line.
+`settings`, `replay` and `quit` are its commands, one per line.
 
 - **Shortcut.** With read access to `/dev/input` (the `input` group, below), the app also sees the
   shortcut itself. Tap it to record the screen, or keep Alt+Shift held after the S to open the
@@ -82,7 +82,7 @@ It listens on `$XDG_RUNTIME_DIR/scrawl/ctl.sock` (owner-only); `toggle`, `stop`,
   shortcut, the transcriber choice, video export) aren't there. While it listens for a new Record
   shortcut the current one is ignored, from the keys and from `scrawl toggle`; the window class is
   `scrawl-settings`.
-- **Tray.** Record or Stop, Open Latest Capture, Settings and Quit Scrawl. It needs a StatusNotifierItem
+- **Tray.** Record or Stop, Open Latest Capture, Save Last 30 s (with the replay buffer on), Settings and Quit Scrawl. It needs a StatusNotifierItem
   host on the bar (waybar's `tray` module, Noctalia's bar); without one the app runs without it.
 - **Quitting.** Quit Scrawl, `quit` on the socket, SIGTERM, SIGINT and SIGHUP all quit the same
   way: a running recording is thrown away and its `wf-recorder` stopped, then the socket goes.
@@ -90,6 +90,50 @@ It listens on `$XDG_RUNTIME_DIR/scrawl/ctl.sock` (owner-only); `toggle`, `stop`,
   a stale socket, which the next `scrawl app` replaces.
 - **Housekeeping.** gpui ends an app whose last window closes, so the app keeps an empty 1×1
   window on the hidden special workspace `special:scrawl`.
+
+### Replay buffer: save what just happened
+
+Off by default. With **Replay buffer** on in Settings, Recording (or `"replayBuffer": true` in
+`~/.config/scrawl/config.json`; `"replaySeconds"` sets the window, 30 by default, 5 to 60), `scrawl app`
+keeps the last seconds of the focused output and the microphone. `scrawl replay`, the control
+socket's `replay` and the tray's **Save Last 30 s** save them as a normal bundle: the video and
+audio of the window, then the usual finish (Parakeet, keyframes, contact sheet, summary, clipboard,
+a notification). There is no ink, pin, click or window log for the past, and the summary's note
+says so. Bind it next to the recording shortcut (not done for you):
+
+```lua
+hl.bind("ALT + SHIFT + R", hl.dsp.exec_cmd("scrawl replay"))
+```
+
+or `bind = ALT SHIFT, R, exec, scrawl replay`.
+
+**Privacy: this is an always-on recording.** While the buffer runs the microphone is open and
+being recorded, locally and in memory only, for as long as Scrawl runs, not only during captures.
+Scrawl is on the Noctalia shell privacy indicator's ignore list (as is `wf-recorder`), so **the
+indicator will not show the microphone or the screen being captured**. Nothing is written to disk
+as audio: the video segments live in `$XDG_RUNTIME_DIR/scrawl/replay/` (tmpfs, so memory), at most
+the window plus 6 s of them (and under 256 MB), and are deleted as they age out and when the app
+quits; the microphone keeps the same window in RAM. Nothing leaves the machine unless you save a
+replay. Keep it off if that is not acceptable.
+
+- **How.** One `wf-recorder` writes 2 s MPEG-TS segments (its `segment` muxer), NVENC at about 3 Mb/s
+  (x264 ultrafast if NVENC won't start, as for recordings), a key frame every 60 frames, written
+  only when the screen changes, so a still screen costs nothing. Saving stops the recorder (which
+  flushes the open segment), copies the segments from the one the window starts in into an mp4
+  without re-encoding, and cuts the audio to the same span. Then the buffer starts over from empty.
+- **Recording while it runs.** The buffer switches off for the length of a recording (two
+  full-screen encodes and microphone streams at once would double the load for no use, and a second
+  NVENC session on a 6 GB card that has run out of memory before is not worth the risk) and starts
+  again when it ends. Pausing throws away what it held.
+- **Locked screen.** Checked every second; the buffer stops and drops what it held when hyprlock
+  is up, so nothing from before a lock comes out after it, and starts again on unlock.
+- **Quitting.** Quit, SIGTERM, SIGINT and SIGHUP stop the buffer's `wf-recorder`; it is also started
+  with `PR_SET_PDEATHSIG`, so a SIGKILL of the app ends it too (the normal recordings' `wf-recorder`
+  does not have this, and can still be left behind).
+- **Limits.** It records the output that was focused when it started (a monitor focus change
+  doesn't follow), and a clip begins on the picture the screen showed at the window's start; a save
+  moments after the buffer starts has only what it held. If a save says nothing was buffered, check
+  the Scrawl log for `Replay buffer:` lines.
 
 ### Ink, pins and the picker's dim
 

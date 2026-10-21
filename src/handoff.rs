@@ -351,6 +351,13 @@ pub struct Config {
     /// holds the task's token, so it stays in this file.
     #[serde(default)]
     pub t3_webhook: Option<String>,
+    /// Linux: keeps a rolling buffer of the screen and microphone so `scrawl replay` can save the
+    /// last seconds (default off).
+    #[serde(default)]
+    pub replay_buffer: Option<bool>,
+    /// How many seconds the replay buffer holds (default 30, at most 60).
+    #[serde(default)]
+    pub replay_seconds: Option<u64>,
     /// `"apple"` (default) or `"hex"`: which engine transcribes recordings (`transcribe`).
     #[serde(default)]
     pub transcriber: Option<String>,
