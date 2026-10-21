@@ -335,6 +335,14 @@ pub struct Config {
     /// Feature flag: shows **Export Last Capture as Video…** in the menu (default off).
     #[serde(default)]
     pub video_export: Option<bool>,
+    /// Linux: collects the browser tab's errors and the repository around the recording into
+    /// the bundle (`dev_context`, default off).
+    #[serde(default)]
+    pub dev_context: Option<bool>,
+    /// Linux: a browser's remote debugging port, for one whose `DevToolsActivePort` file isn't
+    /// under `~/.config` (`devContext` looks there itself).
+    #[serde(default)]
+    pub cdp_port: Option<u16>,
     /// `"apple"` (default) or `"hex"`: which engine transcribes recordings (`transcribe`).
     #[serde(default)]
     pub transcriber: Option<String>,
@@ -571,6 +579,19 @@ pub fn auto_send() -> bool {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn video_export() -> bool {
     config().video_export.unwrap_or(false)
+}
+
+/// Whether recordings collect the browser tab's errors and the repository (`devContext`,
+/// default off).
+#[cfg(target_os = "linux")]
+pub fn dev_context() -> bool {
+    config().dev_context.unwrap_or(false)
+}
+
+/// The browser debugging port named in the config (`cdpPort`).
+#[cfg(target_os = "linux")]
+pub fn cdp_port() -> Option<u16> {
+    config().cdp_port
 }
 
 /// The configured transcriber name (`transcriber`) as written, unvalidated.

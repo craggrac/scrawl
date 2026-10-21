@@ -1,6 +1,7 @@
 //! Linux backends for what macOS does with ScreenCaptureKit, AppKit and `scrawl-helper`, and
 //! the headless recording flow a Hyprland key bind drives through `scrawl toggle`.
 
+pub mod context;
 pub mod control;
 pub mod export;
 pub mod hotkey;
@@ -151,6 +152,7 @@ fn capture_into(
             hypr::WindowLogger::start(target.frame, started_at, Arc::clone(&request))
         });
         let input = input::InputRecorder::start(target.frame, started_at, request, None);
+        let dev_context = context::Collector::start(started_at);
         notify_for(
             &if until_stopped {
                 "Recording. Press the shortcut again to stop.".to_owned()
@@ -165,8 +167,10 @@ fn capture_into(
         // The input thread stops first, so the events end with the recording rather than with
         // the recorder's flush.
         let events = input.stop();
+        let dev_context = dev_context.map(context::Collector::stop).unwrap_or_default();
         let recording = session.stop()?;
-        let activity = window_log.map(hypr::WindowLogger::stop).unwrap_or_default();
+        let mut activity = window_log.map(hypr::WindowLogger::stop).unwrap_or_default();
+        activity.dev_context = dev_context;
         let recorded_audio = audio.and_then(|a| {
             a.stop()
                 .inspect_err(|error| scrawl_log(format!("Audio: {error:#}")))

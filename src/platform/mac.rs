@@ -19,6 +19,19 @@ pub use crate::native::pill::NativePill;
 pub use crate::phone::PhoneSession;
 pub use crate::windows::WindowLogger;
 
+/// Browser and project context is collected on Linux only (`crate::linux::context`).
+pub struct ContextCollector;
+
+impl ContextCollector {
+    pub fn start(_started_at: std::time::Instant) -> Option<Self> {
+        None
+    }
+
+    pub fn stop(self) -> crate::dev_context::DevContext {
+        crate::dev_context::DevContext::default()
+    }
+}
+
 /// The review window's button that opens a bundle's folder, and what it says once it has.
 pub const SHOW_IN_FILE_MANAGER: &str = "Show in Finder";
 pub const OPENED_IN_FILE_MANAGER: &str = "Opened in Finder";
