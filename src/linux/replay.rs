@@ -936,4 +936,62 @@ mod tests {
         assert!(decoded.success());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// The ring end to end with `ffmpeg -re` standing in for `wf-recorder` (it writes the same
+    /// real-time segments and, like it, ends cleanly on SIGINT) and no microphone: ticks drop
+    /// old segments, a save cuts the window out. Run by hand (`--ignored`): it takes 11 s.
+    #[test]
+    #[ignore = "real time: 11 s"]
+    fn a_ring_prunes_as_it_goes_and_a_save_cuts_the_window() {
+        let dir = std::env::temp_dir().join(format!("scrawl-replay-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let child = Command::new("ffmpeg")
+            .args(["-v", "error", "-re", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=1920x1080:rate=30:duration=11")
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"])
+            .args(["-bf", "0", "-g", "60"])
+            .args(["-f", "segment", "-segment_time", "2", "-segment_format", "mpegts"])
+            .arg(dir.join(SEGMENT_PATTERN))
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut run = Run {
+            child,
+            dir: dir.clone(),
+            target: crate::linux::hypr::focused_monitor_target(None),
+            origin: SystemTime::now(),
+            audio: None,
+            audio_retry: Instant::now() + Duration::from_secs(3_600),
+            said: Arc::default(),
+        };
+        // Only the margin is kept (6 s): by the end the first segments (closed at 2 and 4 s) are gone.
+        let mut most = 0;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_secs(1));
+            run.tend(0).unwrap();
+            most = most.max(list_segments(&dir).len());
+        }
+        let left = list_segments(&dir);
+        assert!(most <= 6, "{most} segments at once");
+        assert!(left[0].index > 0, "nothing was pruned");
+        assert!(run.origin > SystemTime::now() - Duration::from_secs(10));
+        let bundle = std::env::temp_dir().join(format!("scrawl-replay-bundle-{}", std::process::id()));
+        std::fs::create_dir_all(&bundle).unwrap();
+        let began = Instant::now();
+        let saved = run.save(&bundle, 2).unwrap();
+        eprintln!("save took {} ms", began.elapsed().as_millis());
+        assert!((1_900..=2_100).contains(&saved.recording.duration_ms));
+        let video = saved.recording.video.unwrap();
+        let probed = crate::helper::probe(&video).unwrap();
+        assert!(
+            (probed.duration_ms as i64 - 2_000).abs() <= 150,
+            "{} ms of video",
+            probed.duration_ms
+        );
+        assert!(saved.audio.is_none());
+        let _ = std::fs::remove_dir_all(bundle);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

@@ -239,6 +239,10 @@ enum Command {
     /// Start a recording, or stop the running one (bind it to a key in Hyprland).
     #[cfg(target_os = "linux")]
     Toggle,
+    /// Save the last seconds from the running app's replay buffer as a capture (bind it to a key
+    /// in Hyprland; the buffer is `"replayBuffer": true` in the config).
+    #[cfg(target_os = "linux")]
+    Replay,
     /// Build a bundle from a ScrawlKit in-app recording (`.mp4` + timeline `.json`).
     Import {
         /// The recording or its timeline; defaults to the newest pair in ~/Downloads.
@@ -1597,6 +1601,8 @@ fn main() -> Result<()> {
         } => linux::record(window.as_deref(), duration, until_stopped, note, out),
         #[cfg(target_os = "linux")]
         Command::Toggle => linux::toggle::toggle(),
+        #[cfg(target_os = "linux")]
+        Command::Replay => linux::replay::command(),
         Command::Import {
             recording,
             timeline,
