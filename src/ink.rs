@@ -141,6 +141,8 @@ mod tracker {
         /// A ⇧-press inside the target: when, and where (global points).
         press: Option<(u64, f64, f64)>,
         snapshot: bool,
+        /// When the pointer was last asked for.
+        last_look: Option<u64>,
     }
 
     impl InkTracker {
@@ -153,6 +155,7 @@ mod tracker {
                 drawing: false,
                 press: None,
                 snapshot: false,
+                last_look: None,
             }
         }
 
@@ -229,8 +232,17 @@ mod tracker {
             }
         }
 
-        /// Looks at the pointer: the 8 ms poll while ⇧ is held, and after a modifier changes.
+        /// Looks at the pointer: the 8 ms poll while ⇧ is held (the thread wakes for every
+        /// event of a fast mouse, but the pointer is only asked once per period, as macOS'
+        /// poller sleeps), and at once when a modifier changes (`handle`).
         pub fn tick(&mut self, t: u64, cursor: CursorSource<'_>) {
+            let period = crate::linux::input::SamplePacer::INK_MS as u64;
+            if self
+                .last_look
+                .is_some_and(|last| t.saturating_sub(last) < period)
+            {
+                return;
+            }
             self.look(t, cursor);
         }
 
@@ -331,6 +343,7 @@ mod tracker {
             }
             let only_shift = shift && !others && !self.await_shift_release;
             if only_shift {
+                self.last_look = Some(t);
                 let Some((x, y)) = cursor() else { return };
                 *self
                     .state
@@ -507,6 +520,40 @@ mod tracker {
             );
             assert!(rig.tracker.shift_held());
             assert_eq!(rig.tracker.pointer(), [700.0, 425.0]);
+        }
+
+        #[test]
+        fn the_pointer_is_looked_at_once_per_poll_period_however_often_the_thread_wakes() {
+            // A 1 kHz mouse wakes the input thread every millisecond.
+            let mut rig = Rig::new();
+            rig.feed(0, key(SHIFT, 1));
+            let asked = Cell::new(0_u32);
+            for t in 1..=100_u64 {
+                // 20 points on every step, so every look that happens adds a point.
+                let at = (110.0 + (t % 2) as f64 * 20.0, 60.0 + t as f64 * 4.0);
+                rig.at.set(Some(at));
+                let at = &rig.at;
+                let mut cursor = || {
+                    asked.set(asked.get() + 1);
+                    at.get()
+                };
+                rig.tracker.tick(t, &mut cursor);
+            }
+            // Every 8 ms: 12 looks in 100 ms, and the press's own.
+            assert!((11..=13).contains(&asked.get()), "asked {}", asked.get());
+            let points = rig.live().unwrap().pts.len() / 3;
+            assert!((12..=14).contains(&points), "{points} points");
+        }
+
+        #[test]
+        fn a_modifier_change_looks_at_once_inside_the_period() {
+            let mut rig = Rig::new();
+            rig.feed(0, key(SHIFT, 1));
+            draw_line(&mut rig, 8, 8);
+            // 1 ms after the last look: ⇧ up still ends the ink then and there.
+            rig.feed(8 * 8 + 9, key(SHIFT, 0));
+            assert!(rig.live().is_none());
+            assert_eq!(rig.strokes().len(), 1);
         }
 
         #[test]
