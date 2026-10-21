@@ -184,6 +184,65 @@ pub fn focus_window(address: &str) {
     }
 }
 
+/// The commands that send the window of `class` to the top of the stack: Lua, and for a
+/// Hyprland before 0.53 the dispatcher.
+pub fn raise_commands(class: &str) -> [String; 2] {
+    [
+        format!(
+            "eval hl.dispatch(hl.dsp.window.alter_zorder({{ mode = \"top\", window = \"class:^({class})$\" }}))"
+        ),
+        format!("dispatch alterzorder top,class:^({class})$"),
+    ]
+}
+
+/// Sends the window of `class` to the top of the stack.
+pub fn raise_window(class: &str) {
+    let [lua, legacy] = raise_commands(class);
+    let Err(lua_error) = hypr_command(&lua) else {
+        return;
+    };
+    if let Err(error) = hypr_command(&legacy) {
+        scrawl_log(format!(
+            "Hyprland: could not raise {class}: {lua_error:#}; {error:#}"
+        ));
+    }
+}
+
+/// Whether the capsule has to be raised over the picker: both are mapped and the capsule was
+/// mapped first (Hyprland lists windows in the order they mapped, which is their stacking
+/// among floating windows of one kind).
+pub fn pill_under_picker(clients: &[Client]) -> bool {
+    let position = |class: &str| {
+        clients
+            .iter()
+            .position(|c| c.class == class && c.mapped && !c.hidden)
+    };
+    matches!(
+        (position(PILL_CLASS), position(PICKER_CLASS)),
+        (Some(pill), Some(picker)) if pill < picker
+    )
+}
+
+/// The picker is opening: once it is mapped, a capsule that was already open (the Completed
+/// one, say) goes back above the picker's dim. A capsule that opens after the picker is
+/// above it already. Waits for them, so run it off the UI thread.
+pub fn keep_pill_over_picker() {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(1_500) {
+        let clients = clients();
+        let mapped = |class: &str| clients.iter().any(|c| c.class == class && c.mapped);
+        if pill_under_picker(&clients) {
+            raise_window(PILL_CLASS);
+            return;
+        }
+        // Both up, in the right order: nothing to do.
+        if mapped(PILL_CLASS) && mapped(PICKER_CLASS) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
 /// The focused window, if any.
 pub fn active_window() -> Option<Client> {
     parse_active_window(&hypr_request("j/activewindow").ok()?)
@@ -991,5 +1050,47 @@ mod tests {
                 "size 1120 740, class:^(scrawl-review)$",
             ]
         );
+    }
+    fn client(class: &str, mapped: bool) -> Client {
+        serde_json::from_value(serde_json::json!({
+            "address": format!("0x{class}"),
+            "at": [0, 0],
+            "size": [100, 100],
+            "class": class,
+            "title": "",
+            "workspace": { "id": 1, "name": "1" },
+            "monitor": 0,
+            "mapped": mapped,
+            "hidden": false,
+            "floating": true,
+            "focusHistoryID": 0,
+            "pid": 1,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn raising_the_capsule_is_alter_zorder_top_in_lua_and_in_the_old_dispatcher() {
+        assert_eq!(
+            raise_commands("scrawl-pill"),
+            [
+                r#"eval hl.dispatch(hl.dsp.window.alter_zorder({ mode = "top", window = "class:^(scrawl-pill)$" }))"#.to_owned(),
+                "dispatch alterzorder top,class:^(scrawl-pill)$".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_capsule_is_raised_once_both_it_and_the_picker_are_mapped() {
+        let both = [client("Helium", true), client("scrawl-pill", true), client("scrawl-picker", true)];
+        assert!(pill_under_picker(&both));
+        // A capsule that mapped after the picker is above it already.
+        let after = [client("scrawl-picker", true), client("scrawl-pill", true)];
+        assert!(!pill_under_picker(&after));
+        // No capsule (it opens after the picker, so above it), or a picker not up yet.
+        assert!(!pill_under_picker(&[client("scrawl-picker", true)]));
+        assert!(!pill_under_picker(&[client("scrawl-pill", true), client("scrawl-picker", false)]));
+        assert!(!pill_under_picker(&[client("scrawl-pill", false), client("scrawl-picker", true)]));
+        assert!(!pill_under_picker(&[]));
     }
 }

@@ -102,12 +102,19 @@ pub fn move_window_to_screen(ns_win: &NativeWindow, _frame: [f64; 4]) {
     match *ns_win {}
 }
 
-/// The picker window's rule does it all.
+/// The picker window's rule places it; its dim would cover a capsule that is already open, so
+/// that one is raised over the picker once the picker is up.
 pub fn configure_picker_window(
     _picker_coord: &Entity<ScrawlCoordinator>,
     _lab: bool,
     _cx: &mut App,
 ) {
+    let spawned = std::thread::Builder::new()
+        .name("scrawl-raise-pill".into())
+        .spawn(hypr::keep_pill_over_picker);
+    if let Err(error) = spawned {
+        crate::capture::scrawl_log(format!("Could not raise the capsule over the picker: {error}"));
+    }
 }
 
 pub fn bring_pill_forward(ns_win: &NativeWindow) {
