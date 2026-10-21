@@ -41,7 +41,7 @@ bind = ALT SHIFT, S, exec, scrawl toggle
 
 Press it to start and again to stop. The bundle lands in `~/.local/share/scrawl/captures/` and its
 summary on the clipboard; `scrawl send latest --session ses_…` delivers it to OpenCode. Not yet on
-Linux: ink, iPhone capture, video export, the settings window.
+Linux: iPhone capture, video export, the settings window.
 
 ### The app
 
@@ -82,7 +82,37 @@ and `quit` are its commands, one per line.
 - **Housekeeping.** gpui ends an app whose last window closes, so the app keeps an empty 1×1
   window on the hidden special workspace `special:scrawl`.
 
-Untested so far: where the picker and capsule land with more than one monitor.
+### Ink, pins and the picker's dim
+
+Hold **⇧** during a recording and move the pointer to draw in red (`#ff3b30`); ⇧-click drops a
+numbered pin (a press that moves under 12 pt and lets go within 1 s; longer is ink). Ink holds for
+0.65 s after you stop and fades over the next 0.65 s; pins stay. The strokes and pins are in the bundle
+(`scrawl.json`, the marks in `summary.md`, redrawn on the keyframes) as on macOS. ⇧ with Ctrl,
+Alt or Super draws nothing, and a ⇧ tap on the spot (a capital letter) leaves no mark.
+
+- **The ink is in the video.** It is drawn by a `wlr-layer-shell` surface on the overlay layer
+  (namespace `scrawl-ink`, no input region: clicks and hover go to the windows under it), and
+  `wf-recorder` records the composited output, so the video shows the ink while it holds and fades.
+  macOS leaves its overlay out of the capture; `wf-recorder` can't exclude a layer. The keyframes
+  are redrawn from the strokes as before, a little bolder than the video's ink, so they cover it
+  rather than doubling it. Nothing else of Scrawl's is drawn into a recording: no dim, no glow.
+- **Needs `zwlr_layer_shell_v1`.** Hyprland, sway and the other wlroots-protocol compositors have
+  it; GNOME's Mutter doesn't, and there the log says "Metal overlay failed" and recordings go on
+  without ink. The overlay sits over the output holding the target's centre. It maps nothing until
+  there is ink and makes no commit while idle (`wf-recorder` writes a frame per commit).
+- **The pointer comes from Hyprland** (`cursorpos` on its socket, every 8 ms while ⇧ is held), since
+  evdev has no position. Only ⇧, Ctrl, Alt and Super presses and the mouse buttons are read for ink,
+  and no key is kept, as for clicks above. Needs the `input` group like clicks do.
+- **No Ctrl+Z.** evdev can't consume a key, so a Scrawl Ctrl+Z would also undo in whatever app has
+  the keyboard. The capsule's Undo chip is the only undo, and the capsule is hidden while recording.
+- **The picker draws its own dim** (`TargetPickerWindow`): the screen dimmed, a cutout over the
+  hovered window, the screen or the dragged area, with a blue tint and border for a window or screen
+  and a thin white one for an area. Its Hyprland rule has `rounding = 0` so the screen's corners dim.
+- **Fractional scaling isn't supported yet.** The ink overlay draws at the integer scale the
+  compositor reports; on a monitor scaled by a fraction (1.25, 1.5) it assumes scale 1, logs it once
+  ("the output is scaled by …") and the ink is a little soft but in the right place. The
+  picker's dim and the capsule come from GPUI, which handles it itself. Untested with more than one
+  output, and where the picker and capsule land with more than one monitor.
 
 While recording, Scrawl notes clicks, drags, scrolling and Ctrl/Super shortcuts (for example
 `Ctrl+L`) from the input devices, and the keyframes around them say "clicked ..." or "scrolled
