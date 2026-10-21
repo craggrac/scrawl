@@ -285,13 +285,24 @@ impl Drop for Server {
     }
 }
 
-/// Parakeet over the recording's speech islands, with measured word times.
-pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
+/// The server and the model `transcribe` needs.
+fn requirements() -> Result<(PathBuf, PathBuf)> {
     let binary = server_binary()
         .context("sherpa-onnx-ws not found: install OpenWhispr or set SCRAWL_SHERPA_WS")?;
     let model = model_dir().with_context(|| {
         format!("{MODEL_NAME} not found: download it in OpenWhispr or set SCRAWL_PARAKEET_DIR")
     })?;
+    Ok((binary, model))
+}
+
+/// What keeps `transcribe` from running (the first missing piece), or `None` when it can.
+pub fn missing() -> Option<String> {
+    requirements().err().map(|error| format!("{error:#}"))
+}
+
+/// Parakeet over the recording's speech islands, with measured word times.
+pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
+    let (binary, model) = requirements()?;
     let samples = audio::decode_wav_16k(&std::fs::read(wav)?)?;
     let duration_ms = samples.len() as u64 / SAMPLES_PER_MS;
     let mut transcript = TranscriptData {

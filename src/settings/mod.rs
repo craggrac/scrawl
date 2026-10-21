@@ -1,37 +1,54 @@
-//! The Settings window. It is SwiftUI in `scrawl-helper settings` and, like onboarding, only
-//! draws what this module sends it (`View`) and reports what was clicked or typed (`Action`).
-//! Everything is decided and written here: `~/.config/scrawl/config.json` keeps its other keys
-//! and its `0600` mode (it holds the ingest token).
+//! The Settings window. On macOS it is SwiftUI in `scrawl-helper settings` and, like onboarding,
+//! only draws what this module sends it (`View`) and reports what was clicked or typed
+//! (`Action`); on Linux the GPUI window in `crate::ui` does the same in-process, and
+//! `linux.rs` has what differs (the shortcut, launch at login). Everything is decided and
+//! written here: `~/.config/scrawl/config.json` keeps its other keys and its `0600` mode (it
+//! holds the ingest token).
 //!
 //! Panes: General (launch at login, sending dev-site captures, the two shortcuts), Recording
 //! (transcriber, video export), Storage (how long recordings are kept), Permissions (the
 //! onboarding checklist, to fix things later), Agents (`scrawl` on PATH, the skill's install
-//! command) and About.
+//! command) and About. Linux has General (launch at login and the record shortcut), Recording
+//! (microphone, Parakeet), Storage (size, no retention) and Agents and About without the Mac
+//! parts.
 //!
 //! Shortcuts live under `"shortcuts"` (`{"record": {"keyCode", "modifiers", "label"}}`, Carbon
 //! modifier bits; absent means the default). While the window records one, Scrawl's hotkeys are
-//! paused (`capture::pause_shortcuts`) so the current combo reaches the recorder.
+//! paused (`capture::pause_shortcuts`) so the current combo reaches the recorder. On Linux the
+//! record shortcut is `"linuxShortcuts"` and the evdev listener is what is paused.
 
+#[cfg(target_os = "macos")]
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
 use crate::capture::{
     CARBON_CMD_KEY, CARBON_CONTROL_KEY, CARBON_OPTION_KEY, CARBON_SHIFT_KEY, ShortcutConfig,
     ShortcutKind, modifier_symbols,
 };
+#[cfg(target_os = "macos")]
 use crate::onboarding::{Grants, Permission, Status};
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use self::linux::*;
 
 // MARK: Shortcuts in the config
 
 /// Scrawl's two shortcuts.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(target_os = "macos")]
 pub struct Shortcuts {
     pub record: ShortcutConfig,
     pub paste: ShortcutConfig,
 }
 
+#[cfg(target_os = "macos")]
 impl Default for Shortcuts {
     fn default() -> Self {
         Self {
@@ -43,12 +60,14 @@ impl Default for Shortcuts {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(target_os = "macos")]
 struct Stored {
     key_code: u32,
     modifiers: u32,
     label: String,
 }
 
+#[cfg(target_os = "macos")]
 impl Shortcuts {
     pub fn get(&self, kind: ShortcutKind) -> &ShortcutConfig {
         match kind {
@@ -121,6 +140,7 @@ impl Shortcuts {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn kind_key(kind: ShortcutKind) -> &'static str {
     match kind {
         ShortcutKind::Record => "record",
@@ -129,6 +149,7 @@ fn kind_key(kind: ShortcutKind) -> &'static str {
 }
 
 /// A stored default is read as the default, so it follows the active layout's key.
+#[cfg(target_os = "macos")]
 fn from_stored(kind: ShortcutKind, stored: Stored) -> Option<ShortcutConfig> {
     let cfg = ShortcutConfig {
         key_code: stored.key_code,
@@ -145,6 +166,7 @@ fn from_stored(kind: ShortcutKind, stored: Stored) -> Option<ShortcutConfig> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn legacy_path() -> PathBuf {
     crate::handoff::default_captures_dir()
         .parent()
@@ -152,6 +174,7 @@ fn legacy_path() -> PathBuf {
         .join("config.json")
 }
 
+#[cfg(target_os = "macos")]
 fn read_json(path: &Path) -> serde_json::Value {
     std::fs::read(path)
         .ok()
@@ -161,12 +184,14 @@ fn read_json(path: &Path) -> serde_json::Value {
 }
 
 /// Saves one shortcut; a default is removed rather than written.
+#[cfg(target_os = "macos")]
 pub fn save_shortcut(kind: ShortcutKind, cfg: &ShortcutConfig) {
     if let Err(error) = save_shortcut_in(&crate::handoff::default_config_path(), kind, cfg) {
         crate::capture::scrawl_log(format!("Saving the {kind:?} shortcut failed: {error:#}"));
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn save_shortcut_in(
     path: &Path,
     kind: ShortcutKind,
@@ -194,6 +219,7 @@ pub fn save_shortcut_in(
 }
 
 /// The label of the paste shortcut, for hints (`⌥⇧V` unless changed).
+#[cfg(target_os = "macos")]
 pub fn paste_label() -> String {
     PASTE_LABEL
         .lock()
@@ -202,8 +228,10 @@ pub fn paste_label() -> String {
         .unwrap_or_else(|| "⌥⇧V".to_owned())
 }
 
+#[cfg(target_os = "macos")]
 static PASTE_LABEL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+#[cfg(target_os = "macos")]
 pub fn note_paste_label(label: &str) {
     if let Ok(mut slot) = PASTE_LABEL.lock() {
         *slot = Some(label.to_owned());
@@ -215,6 +243,7 @@ pub fn note_paste_label(label: &str) {
 /// A key combination pressed in the recorder.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(target_os = "macos")]
 pub struct Pressed {
     pub key_code: u32,
     /// Carbon modifier bits (⌘ 1<<8, ⇧ 1<<9, ⌥ 1<<11, ⌃ 1<<12).
@@ -228,6 +257,7 @@ pub struct Pressed {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(target_os = "macos")]
 pub enum Rejection {
     /// Only ⇧, or nothing, with a key that isn't a function key.
     NoModifier,
@@ -241,6 +271,7 @@ pub enum Rejection {
     Refused,
 }
 
+#[cfg(target_os = "macos")]
 impl Rejection {
     pub fn message(&self) -> String {
         match self {
@@ -256,6 +287,7 @@ impl Rejection {
     }
 }
 
+#[cfg(target_os = "macos")]
 const FUNCTION_KEYS: [(u32, &str); 16] = [
     (122, "F1"),
     (120, "F2"),
@@ -275,6 +307,7 @@ const FUNCTION_KEYS: [(u32, &str); 16] = [
     (106, "F16"),
 ];
 
+#[cfg(target_os = "macos")]
 const NAMED_KEYS: [(u32, &str); 8] = [
     (49, "Space"),
     (36, "↩"),
@@ -286,9 +319,11 @@ const NAMED_KEYS: [(u32, &str); 8] = [
     (126, "↑"),
 ];
 
+#[cfg(target_os = "macos")]
 const KEY_ESCAPE: u32 = 53;
 
 /// The name a key is shown with: a function key, a named key, or the typed character in capitals.
+#[cfg(target_os = "macos")]
 pub fn key_label(key_code: u32, typed: &str) -> Option<String> {
     if let Some((_, name)) = FUNCTION_KEYS
         .iter()
@@ -310,6 +345,7 @@ pub fn key_label(key_code: u32, typed: &str) -> Option<String> {
     Some(ch.to_uppercase().collect())
 }
 
+#[cfg(target_os = "macos")]
 fn is_function_key(key_code: u32) -> bool {
     FUNCTION_KEYS.iter().any(|(code, _)| *code == key_code)
 }
@@ -317,6 +353,7 @@ fn is_function_key(key_code: u32) -> bool {
 /// Combinations macOS or nearly every app keeps for itself, as (Carbon modifiers, key label).
 /// Turned-off system shortcuts are allowed; `Pressed::reserved` covers the enabled ones,
 /// including any Kit set up himself.
+#[cfg(target_os = "macos")]
 fn reserved(modifiers: u32, key: &str) -> bool {
     const CMD: u32 = CARBON_CMD_KEY;
     const SHIFT: u32 = CARBON_SHIFT_KEY;
@@ -347,6 +384,7 @@ fn reserved(modifiers: u32, key: &str) -> bool {
 }
 
 /// Checks a pressed combination for `kind` and names it. `other` is Scrawl's other shortcut.
+#[cfg(target_os = "macos")]
 pub fn validate(
     kind: ShortcutKind,
     pressed: &Pressed,
@@ -384,9 +422,24 @@ pub fn validate(
     })
 }
 
+/// Checks a pressed combination for `kind` against the other shortcut.
+#[cfg(target_os = "macos")]
+fn check(
+    kind: ShortcutKind,
+    pressed: &Pressed,
+    shortcuts: &Shortcuts,
+) -> Result<ShortcutConfig, Rejection> {
+    let other = match kind {
+        ShortcutKind::Record => &shortcuts.paste,
+        ShortcutKind::Paste => &shortcuts.record,
+    };
+    validate(kind, pressed, other)
+}
+
 // MARK: Launch at login (SMAppService, macOS 13+)
 
 #[link(name = "ServiceManagement", kind = "framework")]
+#[cfg(target_os = "macos")]
 unsafe extern "C" {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -394,11 +447,13 @@ pub enum LoginItem {
     Off,
     On,
     /// Registered, waiting for the user in System Settings › Login Items.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     NeedsApproval,
     /// Not running from Scrawl.app (a development build).
     Unavailable,
 }
 
+#[cfg(target_os = "macos")]
 fn main_app_service() -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> {
     use objc2::runtime::{AnyClass, AnyObject};
     let class = AnyClass::get(c"SMAppService")?;
@@ -412,6 +467,7 @@ fn main_app_service() -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> 
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn login_item() -> LoginItem {
     let Some(service) = main_app_service() else {
         return LoginItem::Unavailable;
@@ -425,6 +481,7 @@ pub fn login_item() -> LoginItem {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn set_login_item(on: bool) -> anyhow::Result<()> {
     use objc2::runtime::Bool;
     use objc2_foundation::NSError;
@@ -451,6 +508,7 @@ pub fn set_login_item(on: bool) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn open_login_items_settings() {
     use objc2::runtime::AnyClass;
     if let Some(class) = AnyClass::get(c"SMAppService") {
@@ -482,13 +540,20 @@ pub struct View {
     pub auto_send: bool,
     pub shortcuts: Vec<ShortcutView>,
     pub microphone: MicrophoneView,
+    #[cfg(target_os = "macos")]
     pub transcriber: TranscriberView,
+    /// Parakeet, the Linux transcriber.
+    #[cfg(target_os = "linux")]
+    pub parakeet: ParakeetView,
     pub video_export: bool,
+    #[cfg(target_os = "macos")]
     pub retention: RetentionView,
     /// How much the captures folder takes, once measured.
     pub captures_size: Option<String>,
+    #[cfg(target_os = "macos")]
     pub permissions: Vec<PermissionView>,
     pub updates: bool,
+    #[cfg(target_os = "macos")]
     pub command_line: CommandLineView,
     pub skill_command: &'static str,
 }
@@ -496,6 +561,7 @@ pub struct View {
 /// The "Command-line tool" row.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(target_os = "macos")]
 pub struct CommandLineView {
     /// Where `scrawl` is linked, once it is.
     pub path: Option<String>,
@@ -506,6 +572,7 @@ pub struct CommandLineView {
     pub error: bool,
 }
 
+#[cfg(target_os = "macos")]
 impl CommandLineView {
     fn new(state: &crate::command_line::State, error: Option<&str>) -> Self {
         use crate::command_line::{State, tilde, usually_on_path};
@@ -680,6 +747,7 @@ fn microphone_view(
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(target_os = "macos")]
 pub struct TranscriberView {
     /// What recordings use now: "apple" or "hex".
     pub engine: &'static str,
@@ -689,6 +757,7 @@ pub struct TranscriberView {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg(target_os = "macos")]
 pub struct ModelView {
     pub id: String,
     pub title: String,
@@ -696,6 +765,7 @@ pub struct ModelView {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg(target_os = "macos")]
 pub struct RetentionView {
     /// The chosen preset, or `None` for a policy written by hand.
     pub preset: Option<&'static str>,
@@ -704,6 +774,7 @@ pub struct RetentionView {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg(target_os = "macos")]
 pub struct OptionView {
     pub id: &'static str,
     pub label: &'static str,
@@ -711,6 +782,7 @@ pub struct OptionView {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(target_os = "macos")]
 pub struct PermissionView {
     pub permission: Permission,
     pub status: Status,
@@ -720,6 +792,7 @@ pub struct PermissionView {
     pub relaunch: bool,
 }
 
+#[cfg(target_os = "macos")]
 fn preset_id(preset: crate::retention::Preset) -> &'static str {
     match preset {
         crate::retention::Preset::Week => "week",
@@ -728,6 +801,7 @@ fn preset_id(preset: crate::retention::Preset) -> &'static str {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn retention_note(policy: &crate::retention::Policy) -> String {
     let days = |n: u32| {
         if n == 1 {
@@ -748,6 +822,7 @@ fn retention_note(policy: &crate::retention::Policy) -> String {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn shortcut_view(
     kind: ShortcutKind,
     cfg: &ShortcutConfig,
@@ -799,17 +874,23 @@ pub enum Action {
         kind: ShortcutKind,
     },
     /// A permission row's button.
+    #[cfg(target_os = "macos")]
     Grant {
         permission: Permission,
     },
     /// Reopen Scrawl so a Screen Recording grant takes.
+    #[cfg(target_os = "macos")]
     Reopen,
     ShowCaptures,
+    #[cfg(target_os = "macos")]
     CheckForUpdates,
     /// "Show Welcome Tour" on About.
+    #[cfg(target_os = "macos")]
     Tour,
     /// Link `scrawl` into a folder on PATH, or remove that link.
+    #[cfg(target_os = "macos")]
     InstallCli,
+    #[cfg(target_os = "macos")]
     UninstallCli,
     Close,
 }
@@ -819,15 +900,21 @@ pub enum Action {
 pub enum Effect {
     None,
     /// Ask macOS (the system prompt): the first press on a row that was never asked.
+    #[cfg(target_os = "macos")]
     Request(Permission),
     /// Already asked or denied: its System Settings pane.
+    #[cfg(target_os = "macos")]
     OpenSettings(Permission),
     OpenLoginItems,
     ShowCaptures,
+    #[cfg(target_os = "macos")]
     CheckForUpdates,
     /// The captures folder may have changed size.
+    #[cfg(target_os = "macos")]
     Measure,
+    #[cfg(target_os = "macos")]
     Relaunch,
+    #[cfg(target_os = "macos")]
     Tour,
     Close,
 }
@@ -835,12 +922,13 @@ pub enum Effect {
 /// The outside world the window changes: Scrawl's hotkeys and the config file.
 pub trait Host {
     fn shortcuts(&self) -> Shortcuts;
-    /// Registers both, keeping the old ones if macOS refuses one.
+    /// Registers them, keeping the old ones if the system refuses one.
     fn set_shortcuts(&mut self, shortcuts: &Shortcuts) -> Result<(), ShortcutKind>;
     fn pause_shortcuts(&mut self, paused: bool);
     fn config_path(&self) -> PathBuf;
     fn set_login_item(&mut self, on: bool) -> anyhow::Result<()>;
     /// Scrawl's binary and the folders `scrawl` may be linked into.
+    #[cfg(target_os = "macos")]
     fn command_line(&self) -> crate::command_line::Places;
 }
 
@@ -850,8 +938,11 @@ pub struct Panel {
     recording: Option<ShortcutKind>,
     error: Option<(ShortcutKind, String)>,
     /// Why the last Install or Uninstall failed.
+    #[cfg(target_os = "macos")]
     cli_error: Option<String>,
+    #[cfg(target_os = "macos")]
     requested: BTreeSet<Permission>,
+    #[cfg(target_os = "macos")]
     grants: Option<Grants>,
     captures_size: Option<u64>,
     /// The connected microphones, once listed (`mic::Watch` keeps them fresh).
@@ -859,11 +950,12 @@ pub struct Panel {
 }
 
 impl Panel {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn recording(&self) -> Option<ShortcutKind> {
         self.recording
     }
 
+    #[cfg(target_os = "macos")]
     pub fn set_grants(&mut self, grants: Grants) {
         self.grants = Some(grants);
     }
@@ -872,6 +964,7 @@ impl Panel {
         self.captures_size = Some(bytes);
     }
 
+    #[cfg(target_os = "macos")]
     pub fn set_inputs(&mut self, inputs: crate::mic::Inputs) {
         self.inputs = Some(inputs);
     }
@@ -896,11 +989,7 @@ impl Panel {
                 }
                 self.stop_recording(host);
                 let mut shortcuts = host.shortcuts();
-                let other = match kind {
-                    ShortcutKind::Record => &shortcuts.paste,
-                    ShortcutKind::Paste => &shortcuts.record,
-                };
-                match validate(kind, &pressed, other) {
+                match check(kind, &pressed, &shortcuts) {
                     Ok(cfg) => self.apply(kind, cfg, &mut shortcuts, host),
                     Err(rejection) => self.error = Some((kind, rejection.message())),
                 }
@@ -912,7 +1001,9 @@ impl Panel {
                 self.apply(kind, kind.default_config(), &mut shortcuts, host);
                 Effect::None
             }
+            #[cfg(target_os = "macos")]
             Action::Grant { permission } => self.grant(permission),
+            #[cfg(target_os = "macos")]
             Action::Reopen => {
                 if self.screen_relaunch() {
                     Effect::Relaunch
@@ -921,13 +1012,17 @@ impl Panel {
                 }
             }
             Action::ShowCaptures => Effect::ShowCaptures,
+            #[cfg(target_os = "macos")]
             Action::CheckForUpdates => Effect::CheckForUpdates,
+            #[cfg(target_os = "macos")]
             Action::Tour => Effect::Tour,
+            #[cfg(target_os = "macos")]
             Action::InstallCli => {
                 let result = crate::command_line::install(&host.command_line());
                 self.note_cli("install", result.map(drop));
                 Effect::None
             }
+            #[cfg(target_os = "macos")]
             Action::UninstallCli => {
                 let result = crate::command_line::uninstall(&host.command_line());
                 self.note_cli("uninstall", result);
@@ -940,6 +1035,7 @@ impl Panel {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn note_cli(&mut self, verb: &str, result: anyhow::Result<()>) {
         self.cli_error = result.err().map(|error| {
             crate::capture::scrawl_log(format!("Command-line tool: {verb}: {error:#}"));
@@ -999,16 +1095,19 @@ impl Panel {
                     crate::capture::scrawl_log(format!("Saving microphone failed: {error:#}"));
                 }
             }
+            #[cfg(target_os = "macos")]
             ("transcriber", serde_json::Value::String(name)) => {
                 if let Some(engine) = crate::transcribe::Engine::parse(name) {
                     write("transcriber", engine.name().into());
                 }
             }
+            #[cfg(target_os = "macos")]
             ("hexModel", serde_json::Value::String(model)) if !model.trim().is_empty() => {
                 // Picking a Hex model is choosing Hex.
                 write("hexModel", model.trim().into());
                 write("transcriber", "hex".into());
             }
+            #[cfg(target_os = "macos")]
             ("retention", serde_json::Value::String(id)) => {
                 if let Some(preset) = crate::retention::Preset::ALL
                     .into_iter()
@@ -1025,12 +1124,22 @@ impl Panel {
         Effect::None
     }
 
+    /// Microphone is allowed, so its level may be shown (Linux has no permission to ask for).
+    fn microphone_allowed(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.status(Permission::Microphone) == Status::Granted;
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
+    #[cfg(target_os = "macos")]
     fn status(&self, permission: Permission) -> Status {
         self.grants
             .as_ref()
             .map_or(Status::NotDetermined, |g| g.status(permission))
     }
 
+    #[cfg(target_os = "macos")]
     fn screen_relaunch(&self) -> bool {
         self.grants
             .as_ref()
@@ -1039,6 +1148,7 @@ impl Panel {
 
     /// Like onboarding: the first press asks macOS, later ones (or a denied one) open the
     /// System Settings pane.
+    #[cfg(target_os = "macos")]
     fn grant(&mut self, permission: Permission) -> Effect {
         let status = self.status(permission);
         if status == Status::Granted {
@@ -1054,15 +1164,20 @@ impl Panel {
     pub fn view(&self, host: &dyn Host) -> View {
         let config = crate::handoff::load_config_from(&host.config_path());
         let shortcuts = host.shortcuts();
+        #[cfg(target_os = "macos")]
         let hex = crate::hex::cached_status();
+        #[cfg(target_os = "macos")]
         let engine = config
             .transcriber
             .as_deref()
             .and_then(crate::transcribe::Engine::parse)
             .unwrap_or_default();
+        #[cfg(target_os = "macos")]
         let menu = crate::transcribe::menu_state(engine, hex.as_ref(), config.hex_model.as_deref());
+        #[cfg(target_os = "macos")]
         let policy = crate::retention::Policy::load_from(&host.config_path());
         let login = login_item();
+        #[cfg(target_os = "macos")]
         let order = [
             Permission::ScreenRecording,
             Permission::Microphone,
@@ -1096,8 +1211,9 @@ impl Panel {
             microphone: microphone_view(
                 crate::mic::choice_in(&host.config_path()).as_ref(),
                 self.inputs.as_ref(),
-                self.status(Permission::Microphone) == Status::Granted,
+                self.microphone_allowed(),
             ),
+            #[cfg(target_os = "macos")]
             transcriber: TranscriberView {
                 engine: if menu.hex_checked { "hex" } else { "apple" },
                 hex_title: menu.hex_title,
@@ -1108,7 +1224,10 @@ impl Panel {
                     .map(|(id, title, chosen)| ModelView { id, title, chosen })
                     .collect(),
             },
+            #[cfg(target_os = "linux")]
+            parakeet: parakeet_view(),
             video_export: config.video_export.unwrap_or(false),
+            #[cfg(target_os = "macos")]
             retention: RetentionView {
                 preset: policy.preset().map(preset_id),
                 options: crate::retention::Preset::ALL
@@ -1121,6 +1240,7 @@ impl Panel {
                 note: retention_note(&policy),
             },
             captures_size: self.captures_size.map(crate::retention::format_bytes),
+            #[cfg(target_os = "macos")]
             permissions: order
                 .into_iter()
                 .map(|permission| PermissionView {
@@ -1131,7 +1251,12 @@ impl Panel {
                     relaunch: permission == Permission::ScreenRecording && self.screen_relaunch(),
                 })
                 .collect(),
+            // Sparkle is the Mac app's updater; a Linux build is updated by building it again.
+            #[cfg(target_os = "macos")]
             updates: crate::sparkle::available(),
+            #[cfg(target_os = "linux")]
+            updates: false,
+            #[cfg(target_os = "macos")]
             command_line: CommandLineView::new(
                 &crate::command_line::state(&host.command_line()),
                 self.cli_error.as_deref(),
@@ -1144,10 +1269,12 @@ impl Panel {
 // MARK: The live window
 
 /// The real hotkeys and config file.
+#[cfg(target_os = "macos")]
 pub struct AppHost<'a> {
     pub telemetry: &'a crate::capture::SharedCaptureTelemetry,
 }
 
+#[cfg(target_os = "macos")]
 impl Host for AppHost<'_> {
     fn shortcuts(&self) -> Shortcuts {
         let (record, paste) = self.telemetry.shortcuts();
@@ -1183,6 +1310,7 @@ impl Host for AppHost<'_> {
 
 /// From the window's helper process and its pollers.
 #[derive(Clone, Debug)]
+#[cfg(target_os = "macos")]
 pub enum Event {
     Action(Action),
     Grants(Grants),
@@ -1194,6 +1322,7 @@ pub enum Event {
 }
 
 /// The open Settings window.
+#[cfg(target_os = "macos")]
 pub struct Session {
     panel: Panel,
     child: std::process::Child,
@@ -1204,6 +1333,7 @@ pub struct Session {
     _microphones: crate::mic::Watch,
 }
 
+#[cfg(target_os = "macos")]
 impl Session {
     pub fn open(
         pane: Option<Pane>,
@@ -1391,6 +1521,7 @@ impl Session {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for Session {
     fn drop(&mut self) {
         self.polling
@@ -1401,7 +1532,7 @@ impl Drop for Session {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

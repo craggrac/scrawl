@@ -1,6 +1,6 @@
 # Onboarding, permissions and Settings
 
-Read this before changing `src/onboarding.rs`, `src/settings.rs`, `src/command_line.rs` or the helper's `Onboarding.swift`, `PermissionPanel.swift` and `Settings.swift`.
+Read this before changing `src/onboarding.rs`, `src/settings/`, `src/command_line.rs` or the helper's `Onboarding.swift`, `PermissionPanel.swift` and `Settings.swift`.
 
 ## Onboarding (`src/onboarding.rs`, `helper/Onboarding.swift`)
 
@@ -22,7 +22,7 @@ Render every screen and permission state with `scrawl-helper onboarding --render
 
 Rows for draggable lists (`Permission::draggable`: Screen Recording, Accessibility) go straight to `OpenSettings`, which launches `scrawl-helper permission-panel` (`helper/PermissionPanel.swift`) from the row's button: the card flies to just below System Settings (inside its empty lower area when the screen has no room; `PermissionPanel.dock`, checked by `scripts/check-permission-panel-dock.sh`), drags the `Scrawl.app` that contains the helper, reads grants from a fresh `--check` process (never trusts the drop), and is told `granted` when the row turns on. Preview it with `permission-panel --permission screen-recording --preview`; never `tccutil reset` Kit's real grants to test it.
 
-## Settings (`src/settings.rs`, `helper/Settings.swift`)
+## Settings (`src/settings/mod.rs`, `helper/Settings.swift`)
 
 The onboarding pattern again. `scrawl-helper settings` draws the `View` it's sent (General, Recording, Storage, Permissions, Agents, About; ⌘, or the menu's **Settings…**, and **Open Settings** on onboarding's last screen) and reports actions as JSON lines; `Panel` decides and writes `~/.config/scrawl/config.json` through `handoff::set_config_value_in` (other keys and `0600` kept).
 
@@ -35,3 +35,5 @@ Launch at login is `SMAppService.mainApp` (only inside Scrawl.app). There's no D
 Agents › Command-line tool (`src/command_line.rs`) symlinks the app's own binary (its real path, which is how it finds `scrawl-helper`) into the first writable of `/opt/homebrew/bin`, `/usr/local/bin`, else `~/.local/bin`; it never asks for admin, never touches a `scrawl` that doesn't link to a Scrawl.app, and the Homebrew cask's `binary` link reads as installed. A bare `scrawl` from a terminal prints help instead of starting a second app. Agents › Agent skill shows `bunx skills add kitlangton/scrawl` (`skills/scrawl/SKILL.md`, also printed by `scrawl skill`); keep that file true to the CLI.
 
 Render every pane (dark, light, recorder listening, refused, microphone chosen/missing/not allowed) with `scrawl-helper settings --render DIR`; test with `cargo test settings::`.
+
+On Linux the window is GPUI (`src/ui/settings_window.rs`), in-process: it draws the same `View` and sends the same `Action`s to the same `Panel`, so nothing about a setting is decided twice. What differs is behind `cfg` in `settings/mod.rs` and in `settings/linux.rs`: one shortcut (Record, under `"linuxShortcuts"`; the evdev listener is what `pause_shortcuts` stops), launch at login as `~/.config/autostart/scrawl.desktop`, and Parakeet's readiness in place of the transcriber popup. The `View` fields that don't exist there (permissions, the Hex transcriber, retention, the command-line tool) are macOS-only, so Linux can't render or send them; `cargo test settings::` covers both.

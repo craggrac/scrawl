@@ -1141,7 +1141,7 @@ mod tests {
             include_str!("capture/mod.rs"),
             include_str!("capture/mac.rs"),
             include_str!("onboarding.rs"),
-            include_str!("settings.rs"),
+            include_str!("settings/mod.rs"),
             include_str!("ui.rs"),
             include_str!("ui/appkit.rs"),
             include_str!("platform/mac.rs"),

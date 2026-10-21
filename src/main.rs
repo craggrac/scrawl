@@ -36,7 +36,6 @@ mod retention;
 mod routing;
 mod screens;
 mod selection;
-#[cfg(target_os = "macos")]
 mod settings;
 mod sketch;
 #[cfg(target_os = "macos")]

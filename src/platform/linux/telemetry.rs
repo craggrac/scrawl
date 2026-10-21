@@ -49,6 +49,8 @@ pub struct SharedCaptureTelemetry {
     capture_mode: Mutex<CaptureMode>,
     picker_rect: Mutex<Option<([f32; 4], u8)>>,
     escape: AtomicBool,
+    /// The Settings window is recording a new shortcut: the current one is not pressed.
+    shortcuts_paused: AtomicBool,
     /// The modifiers whose release ends the hold of the last accepted shortcut press (0: a tap).
     hold_mods: AtomicU64,
     /// Lets a key press seen by both the listener and the bind act once.
@@ -84,6 +86,7 @@ impl SharedCaptureTelemetry {
             capture_mode: Mutex::new(CaptureMode::Display),
             picker_rect: Mutex::new(None),
             escape: AtomicBool::new(false),
+            shortcuts_paused: AtomicBool::new(false),
             hold_mods: AtomicU64::new(0),
             press_gate: Mutex::new((Instant::now(), PressGate::default())),
             input: Mutex::new(None),
@@ -106,8 +109,17 @@ impl SharedCaptureTelemetry {
         let _ = self.ui_sender.try_send(LiveOverlayEvent::CaptureShortcut);
     }
 
+    /// Stops (or resumes) the record shortcut acting while Settings records a new one, so the
+    /// combination being replaced doesn't start a recording. `scrawl toggle` is paused too.
+    pub fn pause_shortcuts(&self, paused: bool) {
+        self.shortcuts_paused.store(paused, Ordering::Release);
+    }
+
     /// The record shortcut as `source` saw it; the second sighting of one press is dropped.
     pub fn press_shortcut_from(&self, source: PressSource) {
+        if self.shortcuts_paused.load(Ordering::Acquire) {
+            return;
+        }
         let accepted = {
             let mut gate = self
                 .press_gate
@@ -342,6 +354,22 @@ mod tests {
         telemetry.begin_session(frame(), |_| idle_recorder());
         assert!(telemetry.strokes.lock().unwrap().is_empty());
         assert!(telemetry.live_ink.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_paused_shortcut_does_nothing_from_either_source() {
+        let (sender, receiver) = flume::unbounded();
+        let telemetry = SharedCaptureTelemetry::new(sender);
+        telemetry.pause_shortcuts(true);
+        telemetry.press_shortcut_from(PressSource::Keys);
+        telemetry.press_shortcut_from(PressSource::Socket);
+        assert!(receiver.try_recv().is_err());
+        telemetry.pause_shortcuts(false);
+        telemetry.press_shortcut_from(PressSource::Socket);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(LiveOverlayEvent::CaptureShortcut)
+        ));
     }
 
     #[test]
