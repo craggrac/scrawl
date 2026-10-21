@@ -24,6 +24,8 @@ pub const PILL_CLASS: &str = "scrawl-pill";
 pub const PICKER_CLASS: &str = "scrawl-picker";
 /// The review window's app id.
 pub const REVIEW_CLASS: &str = "scrawl-review";
+/// The Settings window's app id.
+pub const SETTINGS_CLASS: &str = "scrawl-settings";
 /// The app id of the window that keeps `scrawl app` running: gpui quits on Linux when its
 /// last window closes, and the capsule closes between captures.
 pub const KEEP_ALIVE_CLASS: &str = "scrawl-keep-alive";
@@ -135,14 +137,15 @@ fn eval_unsupported(reply: &str) -> bool {
 }
 
 /// Installs Scrawl's window rules for this Hyprland session (the user's config is never
-/// edited): the capsule floats top-centre, the picker covers its monitor, the review window
-/// floats centred. Lua (`eval`) first, `keyword windowrulev2` on Hyprland before 0.53.
-pub fn install_window_rules(pill: [f32; 3], review: [f32; 2]) {
+/// edited): the capsule floats top-centre, the picker covers its monitor, the review and Settings
+/// windows float centred. Lua (`eval`) first, `keyword windowrulev2` on Hyprland before 0.53.
+pub fn install_window_rules(pill: [f32; 3], review: [f32; 2], settings: [f32; 2]) {
     let [width, height, top] = pill;
     let lua = [
         pill_rule(width, height, top),
         picker_rule(),
         review_rule(review[0], review[1]),
+        settings_rule(settings[0], settings[1]),
         keep_alive_rule(),
         ink_layer_rule(),
     ];
@@ -153,18 +156,18 @@ pub fn install_window_rules(pill: [f32; 3], review: [f32; 2]) {
         let error = format!("{error:#}");
         if eval_unsupported(&error) {
             scrawl_log(format!("Hyprland has no Lua eval ({error}); trying windowrulev2"));
-            return install_legacy_window_rules(pill, review);
+            return install_legacy_window_rules(pill, review, settings);
         }
         scrawl_log(format!("Hyprland rule (Lua) {rule:?}: {error}"));
     }
 }
 
 /// `install_window_rules` for a Hyprland without `eval`.
-fn install_legacy_window_rules(pill: [f32; 3], review: [f32; 2]) {
+fn install_legacy_window_rules(pill: [f32; 3], review: [f32; 2], settings: [f32; 2]) {
     let [width, height, top] = pill;
     let legacy = legacy_pill_rules(width, height, top)
         .into_iter()
-        .chain(legacy_window_rules(review[0], review[1]))
+        .chain(legacy_window_rules(review, settings))
         .chain(legacy_keep_alive_rules());
     for rule in legacy {
         if let Err(error) = hypr_command(&format!("keyword windowrulev2 {rule}")) {
@@ -782,12 +785,23 @@ pub fn picker_rule() -> String {
     )
 }
 
-/// The review window floats centred at `width`×`height` points instead of tiling.
-pub fn review_rule(width: f32, height: f32) -> String {
+/// A window of `class` floats centred at `width`×`height` points instead of tiling. It is an
+/// ordinary window otherwise: focusable, with the session's border and shadow.
+fn centered_rule(class: &str, width: f32, height: f32) -> String {
     format!(
-        "hl.window_rule({{ match = {{ class = \"^({REVIEW_CLASS})$\" }}, float = true, center = true, \
+        "hl.window_rule({{ match = {{ class = \"^({class})$\" }}, float = true, center = true, \
          size = {{ \"{width}\", \"{height}\" }} }})"
     )
+}
+
+/// The review window, centred.
+pub fn review_rule(width: f32, height: f32) -> String {
+    centered_rule(REVIEW_CLASS, width, height)
+}
+
+/// The Settings window, centred.
+pub fn settings_rule(width: f32, height: f32) -> String {
+    centered_rule(SETTINGS_CLASS, width, height)
 }
 
 /// The keep-alive window lives on a hidden special workspace, unfocusable, 1×1.
@@ -818,8 +832,14 @@ pub fn legacy_ink_layer_rule() -> String {
     format!("noanim, ^({INK_NAMESPACE})$")
 }
 
-/// `picker_rule` and `review_rule` for Hyprland before 0.53.
-pub fn legacy_window_rules(review_width: f32, review_height: f32) -> Vec<String> {
+/// `centered_rule` for Hyprland before 0.53.
+fn legacy_centered_rules(class: &str, width: f32, height: f32) -> [String; 3] {
+    ["float".to_owned(), "center".to_owned(), format!("size {width} {height}")]
+        .map(|rule| format!("{rule}, class:^({class})$"))
+}
+
+/// `picker_rule`, `review_rule` and `settings_rule` for Hyprland before 0.53.
+pub fn legacy_window_rules(review: [f32; 2], settings: [f32; 2]) -> Vec<String> {
     let picker = [
         "float",
         "pin",
@@ -832,13 +852,11 @@ pub fn legacy_window_rules(review_width: f32, review_height: f32) -> Vec<String>
         "size monitor_w monitor_h",
     ]
     .map(|rule| format!("{rule}, class:^({PICKER_CLASS})$"));
-    let review = [
-        "float".to_owned(),
-        "center".to_owned(),
-        format!("size {review_width} {review_height}"),
-    ]
-    .map(|rule| format!("{rule}, class:^({REVIEW_CLASS})$"));
-    picker.into_iter().chain(review).collect()
+    picker
+        .into_iter()
+        .chain(legacy_centered_rules(REVIEW_CLASS, review[0], review[1]))
+        .chain(legacy_centered_rules(SETTINGS_CLASS, settings[0], settings[1]))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1076,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_covers_its_monitor_and_review_floats_centred() {
+    fn picker_covers_its_monitor_and_review_and_settings_float_centred() {
         assert_eq!(
             picker_rule(),
             r#"hl.window_rule({ match = { class = "^(scrawl-picker)$" }, float = true, pin = true, border_size = 0, rounding = 0, no_shadow = true, no_blur = true, no_anim = true, move = { "0", "0" }, size = { "monitor_w", "monitor_h" } })"#
@@ -1086,7 +1104,11 @@ mod tests {
             r#"hl.window_rule({ match = { class = "^(scrawl-review)$" }, float = true, center = true, size = { "1120", "740" } })"#
         );
         assert_eq!(
-            legacy_window_rules(1120.0, 740.0),
+            settings_rule(640.0, 480.0),
+            r#"hl.window_rule({ match = { class = "^(scrawl-settings)$" }, float = true, center = true, size = { "640", "480" } })"#
+        );
+        assert_eq!(
+            legacy_window_rules([1120.0, 740.0], [640.0, 480.0]),
             [
                 "float, class:^(scrawl-picker)$",
                 "pin, class:^(scrawl-picker)$",
@@ -1100,6 +1122,9 @@ mod tests {
                 "float, class:^(scrawl-review)$",
                 "center, class:^(scrawl-review)$",
                 "size 1120 740, class:^(scrawl-review)$",
+                "float, class:^(scrawl-settings)$",
+                "center, class:^(scrawl-settings)$",
+                "size 640 480, class:^(scrawl-settings)$",
             ]
         );
     }

@@ -41,7 +41,7 @@ bind = ALT SHIFT, S, exec, scrawl toggle
 
 Press it to start and again to stop. The bundle lands in `~/.local/share/scrawl/captures/` and its
 summary on the clipboard; `scrawl send latest --session ses_…` delivers it to OpenCode. Not yet on
-Linux: iPhone capture, video export, the settings window.
+Linux: iPhone capture and video export.
 
 ### The app
 
@@ -56,8 +56,8 @@ end)
 
 (or `exec-once = scrawl app` in a `hyprland.conf`). While it runs, the same `scrawl toggle` bind
 drives it instead of starting a separate recorder, and a second `scrawl app` exits with a message.
-It listens on `$XDG_RUNTIME_DIR/scrawl/ctl.sock` (owner-only); `toggle`, `stop`, `cancel`, `review`
-and `quit` are its commands, one per line.
+It listens on `$XDG_RUNTIME_DIR/scrawl/ctl.sock` (owner-only); `toggle`, `stop`, `cancel`, `review`,
+`settings` and `quit` are its commands, one per line.
 
 - **Shortcut.** With read access to `/dev/input` (the `input` group, below), the app also sees the
   shortcut itself. Tap it to record the screen, or keep Alt+Shift held after the S to open the
@@ -73,7 +73,15 @@ and `quit` are its commands, one per line.
 - **Capsule.** `wf-recorder` records the whole output, so the capsule leaves the screen about
   1.5 s into a recording (it never lands in the capture) and comes back for processing and the
   result. Finish a recording with the shortcut, `scrawl toggle` or the tray.
-- **Tray.** Record or Stop, Open Latest Capture and Quit Scrawl. It needs a StatusNotifierItem
+- **Settings.** The tray's Settings…, `settings` on the socket and Super+, in Scrawl's windows open
+  a window with General (launch at login, which writes `~/.config/autostart/scrawl.desktop` to run
+  `scrawl app`, and the Record shortcut), Recording (whether Parakeet is ready), Storage (the size of
+  the captures folder; nothing deletes old captures on Linux, so there is no retention setting),
+  Agents (the skill command) and About. The Mac-only settings (permissions, OpenCode, the Paste
+  shortcut, the transcriber choice, video export) aren't there. While it listens for a new Record
+  shortcut the current one is ignored, from the keys and from `scrawl toggle`; the window class is
+  `scrawl-settings`.
+- **Tray.** Record or Stop, Open Latest Capture, Settings and Quit Scrawl. It needs a StatusNotifierItem
   host on the bar (waybar's `tray` module, Noctalia's bar); without one the app runs without it.
 - **Quitting.** Quit Scrawl, `quit` on the socket, SIGTERM, SIGINT and SIGHUP all quit the same
   way: a running recording is thrown away and its `wf-recorder` stopped, then the socket goes.

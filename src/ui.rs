@@ -67,11 +67,19 @@ const REVIEW_WINDOW_H: f32 = 740.0;
 const PILL_APP_ID: &str = "scrawl-pill";
 const PICKER_APP_ID: &str = "scrawl-picker";
 const REVIEW_APP_ID: &str = "scrawl-review";
+#[cfg(target_os = "linux")]
+const SETTINGS_APP_ID: &str = "scrawl-settings";
+#[cfg(target_os = "linux")]
+const SETTINGS_WINDOW_W: f32 = 640.0;
+#[cfg(target_os = "linux")]
+const SETTINGS_WINDOW_H: f32 = 480.0;
 
 #[cfg(target_os = "macos")]
 mod appkit;
 mod lab;
 pub(crate) mod motion;
+#[cfg(target_os = "linux")]
+mod settings_window;
 
 #[cfg(target_os = "macos")]
 use appkit::*;
@@ -441,7 +449,6 @@ enum MenuAction {
     OpenInbox(PathBuf),
     #[cfg(target_os = "macos")]
     ExportVideo,
-    #[cfg(target_os = "macos")]
     Settings,
     #[cfg(target_os = "macos")]
     CheckForUpdates,
@@ -925,10 +932,11 @@ impl ScrawlCoordinator {
         }
     }
 
+    /// Opens Settings (`settings_window`) once the coordinator's update is over.
     #[cfg(target_os = "linux")]
-    /// Settings come to Linux later (phase 4 part 2).
-    pub fn open_settings(&mut self) {
-        scrawl_log("Settings aren't available on Linux yet");
+    pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let coordinator = cx.entity();
+        cx.defer(move |cx| settings_window::open_settings_window(&coordinator, None, cx));
     }
 
     #[cfg(target_os = "macos")]
@@ -1613,7 +1621,7 @@ impl ScrawlCoordinator {
                 #[cfg(target_os = "macos")]
                 self.open_settings(None);
                 #[cfg(target_os = "linux")]
-                self.open_settings();
+                self.open_settings(cx);
             }
             _ => return false,
         }
@@ -5594,6 +5602,8 @@ fn act_on_menu(action: MenuAction, coord_entity: &Entity<ScrawlCoordinator>, cx:
         MenuAction::Settings => {
             coord_entity.update(cx, |coord, _| coord.open_settings(None));
         }
+        #[cfg(target_os = "linux")]
+        MenuAction::Settings => settings_window::open_settings_window(coord_entity, None, cx),
         #[cfg(target_os = "macos")]
         MenuAction::CheckForUpdates => {
             crate::sparkle::check_for_updates();
@@ -5645,6 +5655,7 @@ fn start_linux_app(
             Command::Stop => MenuAction::Stop,
             Command::Cancel => MenuAction::Cancel,
             Command::Review => MenuAction::OpenLatest,
+            Command::Settings => MenuAction::Settings,
             Command::Quit => MenuAction::Quit,
         };
         socket_tx
@@ -5661,6 +5672,7 @@ fn start_linux_app(
         let _ = menu_tx.send(match item {
             TrayItem::Record => MenuAction::ToggleCapture,
             TrayItem::OpenLatest => MenuAction::OpenLatest,
+            TrayItem::Settings => MenuAction::Settings,
             TrayItem::Quit => MenuAction::Quit,
         });
     });
@@ -5801,6 +5813,7 @@ pub fn run_app(
         crate::linux::hypr::install_window_rules(
             [PILL_WINDOW_W, PILL_WINDOW_H, PILL_WINDOW_TOP],
             [REVIEW_WINDOW_W, REVIEW_WINDOW_H],
+            [SETTINGS_WINDOW_W, SETTINGS_WINDOW_H],
         );
         cx.on_window_closed(|cx| cx.defer(hand_back_keys)).detach();
         let (ui_sender, ui_receiver) = flume::unbounded();
@@ -5937,6 +5950,7 @@ mod tests {
         assert_eq!(PILL_APP_ID, hypr::PILL_CLASS);
         assert_eq!(PICKER_APP_ID, hypr::PICKER_CLASS);
         assert_eq!(REVIEW_APP_ID, hypr::REVIEW_CLASS);
+        assert_eq!(SETTINGS_APP_ID, hypr::SETTINGS_CLASS);
     }
 
     #[test]

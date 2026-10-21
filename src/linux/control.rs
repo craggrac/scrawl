@@ -29,6 +29,8 @@ pub enum Command {
     Cancel,
     /// Open the review window on the latest capture.
     Review,
+    /// Open the Settings window.
+    Settings,
     Quit,
 }
 
@@ -39,6 +41,7 @@ impl Command {
             Self::Stop => "stop",
             Self::Cancel => "cancel",
             Self::Review => "review",
+            Self::Settings => "settings",
             Self::Quit => "quit",
         }
     }
@@ -51,6 +54,7 @@ pub fn parse(line: &str) -> Option<Command> {
         Command::Stop,
         Command::Cancel,
         Command::Review,
+        Command::Settings,
         Command::Quit,
     ]
     .into_iter()
@@ -268,7 +272,7 @@ fn answer(stream: UnixStream, handle: &dyn Fn(Command) -> std::result::Result<()
             Ok(()) => "ok".to_owned(),
             Err(error) => format!("error: {error}"),
         },
-        None => "error: unknown command (toggle, stop, cancel, review, quit)".to_owned(),
+        None => "error: unknown command (toggle, stop, cancel, review, settings, quit)".to_owned(),
     };
     let _ = writeln!(&stream, "{reply}");
 }
@@ -313,6 +317,7 @@ mod tests {
             Command::Stop,
             Command::Cancel,
             Command::Review,
+            Command::Settings,
             Command::Quit,
         ] {
             assert_eq!(parse(&format!("{}\n", command.word())), Some(command));

@@ -1,5 +1,5 @@
 //! The tray icon (StatusNotifierItem, through `ksni`), the Linux status menu: Record or Stop,
-//! Open Latest Capture, Quit. It needs a tray host on the bar (waybar's `tray`, Noctalia's);
+//! Open Latest Capture, Settings, Quit. It needs a tray host on the bar (waybar's `tray`, Noctalia's);
 //! without one Scrawl logs that once and runs without it.
 
 use std::sync::Arc;
@@ -14,6 +14,7 @@ pub enum TrayItem {
     /// Record, or stop the recording.
     Record,
     OpenLatest,
+    Settings,
     Quit,
 }
 
@@ -27,6 +28,7 @@ pub fn rows(recording: bool, shortcut: &str) -> Vec<(String, TrayItem)> {
     vec![
         (format!("{record}  {shortcut}"), TrayItem::Record),
         ("Open Latest Capture".to_owned(), TrayItem::OpenLatest),
+        ("Settings…".to_owned(), TrayItem::Settings),
         ("Quit Scrawl".to_owned(), TrayItem::Quit),
     ]
 }
@@ -204,6 +206,7 @@ mod tests {
         let idle = rows(false, "⌥⇧S");
         assert_eq!(idle[0], ("Record Screen  ⌥⇧S".to_owned(), TrayItem::Record));
         assert_eq!(idle[1].1, TrayItem::OpenLatest);
+        assert_eq!(idle[2], ("Settings…".to_owned(), TrayItem::Settings));
         assert_eq!(
             idle.last().unwrap(),
             &("Quit Scrawl".to_owned(), TrayItem::Quit)
