@@ -1,5 +1,5 @@
 //! The tray icon (StatusNotifierItem, through `ksni`), the Linux status menu: Record or Stop,
-//! Open Latest Capture, Quit. It needs a tray host on the bar (waybar's `tray`, Noctalia's);
+//! Open Latest Capture, Export Last Capture as Video… (when `videoExport` is on), Quit. It needs a tray host on the bar (waybar's `tray`, Noctalia's);
 //! without one Scrawl logs that once and runs without it.
 
 use std::sync::Arc;
@@ -14,21 +14,29 @@ pub enum TrayItem {
     /// Record, or stop the recording.
     Record,
     OpenLatest,
+    ExportVideo,
     Quit,
 }
 
-/// The menu's rows for the state: (label, item).
-pub fn rows(recording: bool, shortcut: &str) -> Vec<(String, TrayItem)> {
+/// The menu's rows for the state: (label, item). `export` is the `videoExport` setting.
+pub fn rows(recording: bool, shortcut: &str, export: bool) -> Vec<(String, TrayItem)> {
     let record = if recording {
         "Stop Recording"
     } else {
         "Record Screen"
     };
-    vec![
+    let mut rows = vec![
         (format!("{record}  {shortcut}"), TrayItem::Record),
         ("Open Latest Capture".to_owned(), TrayItem::OpenLatest),
-        ("Quit Scrawl".to_owned(), TrayItem::Quit),
-    ]
+    ];
+    if export {
+        rows.push((
+            "Export Last Capture as Video…".to_owned(),
+            TrayItem::ExportVideo,
+        ));
+    }
+    rows.push(("Quit Scrawl".to_owned(), TrayItem::Quit));
+    rows
 }
 
 /// Side of the square icon, in pixels.
@@ -102,7 +110,7 @@ impl ksni::Tray for ScrawlTray {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         let mut menu = Vec::new();
-        for (label, item) in rows(self.recording, &self.shortcut) {
+        for (label, item) in rows(self.recording, &self.shortcut, crate::handoff::video_export()) {
             if item == TrayItem::Quit {
                 menu.push(ksni::MenuItem::Separator);
             }
@@ -201,19 +209,28 @@ mod tests {
 
     #[test]
     fn the_menu_follows_the_recording() {
-        let idle = rows(false, "⌥⇧S");
+        let idle = rows(false, "⌥⇧S", false);
         assert_eq!(idle[0], ("Record Screen  ⌥⇧S".to_owned(), TrayItem::Record));
         assert_eq!(idle[1].1, TrayItem::OpenLatest);
         assert_eq!(
             idle.last().unwrap(),
             &("Quit Scrawl".to_owned(), TrayItem::Quit)
         );
-        let recording = rows(true, "⌥⇧S");
+        let recording = rows(true, "⌥⇧S", false);
         assert_eq!(
             recording[0],
             ("Stop Recording  ⌥⇧S".to_owned(), TrayItem::Record)
         );
         assert_eq!(recording.len(), idle.len());
+    }
+
+    #[test]
+    fn the_export_row_is_there_only_when_the_setting_is_on() {
+        let with = rows(false, "⌥⇧S", true);
+        assert_eq!(with.len(), rows(false, "⌥⇧S", false).len() + 1);
+        let at = with.iter().position(|r| r.1 == TrayItem::ExportVideo).unwrap();
+        assert_eq!(with[at].0, "Export Last Capture as Video…");
+        assert_eq!(with.last().unwrap().1, TrayItem::Quit);
     }
 
     fn pixel(data: &[u8], size: i32, x: i32, y: i32) -> [u8; 4] {

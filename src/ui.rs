@@ -439,7 +439,7 @@ enum MenuAction {
     OpenLatest,
     #[cfg(target_os = "macos")]
     OpenInbox(PathBuf),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     ExportVideo,
     #[cfg(target_os = "macos")]
     Settings,
@@ -5590,6 +5590,8 @@ fn act_on_menu(action: MenuAction, coord_entity: &Entity<ScrawlCoordinator>, cx:
         }
         #[cfg(target_os = "macos")]
         MenuAction::ExportVideo => start_video_export(),
+        #[cfg(target_os = "linux")]
+        MenuAction::ExportVideo => crate::linux::export::start_latest_in_background(),
         #[cfg(target_os = "macos")]
         MenuAction::Settings => {
             coord_entity.update(cx, |coord, _| coord.open_settings(None));
@@ -5661,6 +5663,7 @@ fn start_linux_app(
         let _ = menu_tx.send(match item {
             TrayItem::Record => MenuAction::ToggleCapture,
             TrayItem::OpenLatest => MenuAction::OpenLatest,
+            TrayItem::ExportVideo => MenuAction::ExportVideo,
             TrayItem::Quit => MenuAction::Quit,
         });
     });
