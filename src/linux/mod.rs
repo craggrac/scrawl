@@ -161,9 +161,10 @@ fn capture_into(
         wait_for_stop(duration, until_stopped);
         restore_default_signals();
         toggle::clear_pidfile();
-        // The input thread stops first: the screen session needs its events to pick frames.
+        // The input thread stops first, so the events end with the recording rather than with
+        // the recorder's flush.
         let events = input.stop();
-        let recording = session.stop(&events, &[])?;
+        let recording = session.stop()?;
         let activity = window_log.map(hypr::WindowLogger::stop).unwrap_or_default();
         let recorded_audio = audio.and_then(|a| {
             a.stop()

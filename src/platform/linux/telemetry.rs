@@ -14,18 +14,8 @@ use crate::ink::{InkState, Wake};
 use crate::linux::input::InputRecorder;
 use crate::model::{CaptureMode, InteractionEvent, Stroke, TargetFrame};
 
-/// What a finished capture's input left, for the screen session that decodes a frame after
-/// each click and each stroke (`session::ScreenCaptureSession::stop`).
-pub(super) struct Handover {
-    pub events: Vec<InteractionEvent>,
-    pub strokes: Vec<Stroke>,
-}
-
 /// Ends a running input recorder and returns its events.
 type Stopper = Box<dyn FnOnce() -> Vec<InteractionEvent> + Send>;
-
-/// Where a capture's input goes once `finish_session` has it.
-pub(super) type EventSlot = Arc<Mutex<Option<Handover>>>;
 
 pub struct SharedCaptureTelemetry {
     /// Interaction is being recorded.
@@ -64,7 +54,6 @@ pub struct SharedCaptureTelemetry {
     /// Lets a key press seen by both the listener and the bind act once.
     press_gate: Mutex<(Instant, PressGate)>,
     input: Mutex<Option<Stopper>>,
-    session_events: Mutex<Option<EventSlot>>,
 }
 
 impl SharedCaptureTelemetry {
@@ -98,7 +87,6 @@ impl SharedCaptureTelemetry {
             hold_mods: AtomicU64::new(0),
             press_gate: Mutex::new((Instant::now(), PressGate::default())),
             input: Mutex::new(None),
-            session_events: Mutex::new(None),
         })
     }
 
@@ -242,21 +230,13 @@ impl SharedCaptureTelemetry {
         *self.input.lock().unwrap_or_else(PoisonError::into_inner) = Some(start(started_at));
     }
 
-    /// The screen session that will want this capture's events.
-    pub(super) fn hand_events_to(&self, slot: EventSlot) {
-        *self
-            .session_events
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(slot);
-    }
-
     /// Esc went down since the last look (`note_escape`).
     pub fn take_escape(&self) -> bool {
         self.escape.swap(false, Ordering::AcqRel)
     }
 
-    /// Ends the capture's input recording: its events and the ink strokes (both also handed to
-    /// the screen session, and the strokes cleared from the shared state).
+    /// Ends the capture's input recording: its events and the ink strokes (cleared from the
+    /// shared state).
     pub fn finish_session(&self) -> (Vec<InteractionEvent>, Vec<Stroke>) {
         self.active.store(false, Ordering::Release);
         let recorder = self
@@ -275,17 +255,6 @@ impl SharedCaptureTelemetry {
             &mut *self.strokes.lock().unwrap_or_else(PoisonError::into_inner),
         );
         *self.events.lock().unwrap_or_else(PoisonError::into_inner) = events.clone();
-        if let Some(slot) = self
-            .session_events
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Handover {
-                events: events.clone(),
-                strokes: strokes.clone(),
-            });
-        }
         (events, strokes)
     }
 }
@@ -318,11 +287,9 @@ mod tests {
     }
 
     #[test]
-    fn finishing_a_session_returns_its_strokes_and_hands_them_to_the_screen_session() {
+    fn finishing_a_session_returns_its_strokes_and_clears_the_shared_state() {
         let (sender, _receiver) = flume::unbounded();
         let telemetry = SharedCaptureTelemetry::new(sender);
-        let slot: EventSlot = Arc::new(Mutex::new(None));
-        telemetry.hand_events_to(Arc::clone(&slot));
         telemetry.strokes.lock().unwrap().push(stroke(10, None));
         telemetry.strokes.lock().unwrap().push(stroke(20, Some(1)));
         *telemetry.live_ink.lock().unwrap() = Some(stroke(30, None));
@@ -332,12 +299,10 @@ mod tests {
         assert!(events.is_empty());
         assert_eq!(strokes.len(), 2);
         assert_eq!(strokes[1].pin, Some(1));
-        // The shared state is clean for whatever draws next, and the screen session has them.
+        // The shared state is clean for whatever draws next.
         assert!(telemetry.strokes.lock().unwrap().is_empty());
         assert!(telemetry.live_ink.lock().unwrap().is_none());
         assert!(!telemetry.shift_held.load(Ordering::Acquire));
-        let handed = slot.lock().unwrap().take().expect("handed over");
-        assert_eq!(handed.strokes, strokes);
     }
 
     /// A recorder that has stopped and left nothing.

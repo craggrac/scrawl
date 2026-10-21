@@ -1,16 +1,14 @@
 //! A screen capture with the macOS session's shape (`start` / `elapsed_ms` / `stop`), on
 //! `wf-recorder` (`linux::record::ScreenSession`). Its candidate frames are decoded from the
-//! video at the end, plus one after each click and stroke: those come from the telemetry's input
-//! recorder when the capture finishes.
+//! video when the bundle is built (`linux::record::fill_candidates`), not when it stops.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use super::SharedCaptureTelemetry;
-use super::telemetry::{EventSlot, Handover};
 use crate::capture::{ScreenRecording, scrawl_log};
 use crate::linux::record;
 use crate::model::TargetInfo;
@@ -23,7 +21,6 @@ pub struct ScreenCaptureSession {
     recorder: Option<JoinHandle<Option<record::ScreenSession>>>,
     /// Set by `discard_screen_session`: a start still waiting gives up at once.
     cancel: Arc<AtomicBool>,
-    events: EventSlot,
     /// Counts this session in `recorders_running` until its recorder has stopped.
     running: Option<Running>,
 }
@@ -64,8 +61,6 @@ pub fn start_screen_session(
         .started_at
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let events: EventSlot = Arc::new(Mutex::new(None));
-    telemetry.hand_events_to(Arc::clone(&events));
     let cancel = Arc::new(AtomicBool::new(false));
     let thread_cancel = Arc::clone(&cancel);
     let recorder = video.clone().and_then(|path| {
@@ -94,7 +89,6 @@ pub fn start_screen_session(
         video,
         recorder,
         cancel,
-        events,
         running,
     }
 }
@@ -120,19 +114,11 @@ impl ScreenCaptureSession {
         self.started_at.elapsed().as_millis() as u64
     }
 
-    /// Stops the recorder and decodes the candidate frames (after `finish_session`, which
-    /// hands over the events). Without a video, one placeholder frame, as on macOS.
+    /// Stops the recorder. The candidate frames are left to the bundle build, which decodes
+    /// them while the narration is transcribed. Without a video, one placeholder frame, as on
+    /// macOS.
     pub fn stop(self) -> ScreenRecording {
         let duration_ms = self.elapsed_ms().max(100);
-        let Handover { events, strokes } = self
-            .events
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .unwrap_or(Handover {
-                events: Vec::new(),
-                strokes: Vec::new(),
-            });
         let stopped = self
             .recorder
             .and_then(|recorder| {
@@ -142,7 +128,7 @@ impl ScreenCaptureSession {
                     .ok()
                     .flatten()
             })
-            .map(|recorder| recorder.stop(&events, &strokes));
+            .map(record::ScreenSession::stop);
         match stopped {
             Some(Ok(recording)) => recording,
             failed => {
@@ -158,7 +144,7 @@ impl ScreenCaptureSession {
                     readable
                 });
                 ScreenRecording {
-                    frames: vec![crate::render::render_synthetic_demo_frame(1280, 800, 0, 0)],
+                    frames: vec![record::placeholder_frame()],
                     video,
                     duration_ms,
                     video_offset_ms: 0,

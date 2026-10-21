@@ -106,26 +106,6 @@ fn urgent_frame_cap(frame_bytes: usize) -> usize {
     (CANDIDATE_BUDGET_BYTES / 4 / frame_bytes.max(1)).max(1)
 }
 
-/// Decodes the frames at `times`; if the batch fails, one by one so a bad time loses only
-/// itself.
-fn decode_urgent(video: &Path, times: &[u64]) -> Vec<RgbaFrame> {
-    let edge = CANDIDATE_EDGE as u32;
-    if let Ok(frames) = crate::helper::frames(video, FrameTimes::At(times), edge) {
-        return frames;
-    }
-    times
-        .iter()
-        .filter_map(|t| {
-            crate::helper::frames(video, FrameTimes::At(&[*t]), edge)
-                .inspect_err(|error| {
-                    crate::capture::scrawl_log(format!("No frame at {t} ms: {error:#}"));
-                })
-                .ok()
-        })
-        .flatten()
-        .collect()
-}
-
 fn spawn(target: &TargetInfo, video: &Path, codec: &str) -> Result<Child> {
     // A file left by an earlier attempt would pass the first-frame check.
     let _ = std::fs::remove_file(video);
@@ -289,52 +269,97 @@ impl ScreenSession {
         })
     }
 
-    /// Stops wf-recorder and decodes the candidate frames, plus one shortly after each click
-    /// and drag in `events`. `duration_ms` is the whole session on the capture clock (the
-    /// video may be shorter: wf-recorder writes on damage).
-    pub fn stop(mut self, events: &[InteractionEvent], strokes: &[Stroke]) -> Result<ScreenRecording> {
+    /// Stops wf-recorder and returns the recording with no candidate frames yet: they are
+    /// decoded from the video by `fill_candidates` while the narration is transcribed, since
+    /// decoding is the slow part (seconds for a long capture) and nothing here needs it.
+    /// `duration_ms` is the whole session on the capture clock (the video may be shorter:
+    /// wf-recorder writes on damage).
+    pub fn stop(mut self) -> Result<ScreenRecording> {
         let status = terminate(&mut self.child)?;
         let duration_ms = self.started_at.elapsed().as_millis() as u64;
         if !status.success() && status.signal() != Some(libc::SIGINT) && status.code() != Some(130)
         {
             crate::capture::scrawl_log(format!("wf-recorder exited with {status}"));
         }
-        let unusable = || format!("The recording file {} was unusable", self.video.display());
-        let probe = crate::helper::probe(&self.video).with_context(unusable)?;
-        let (width, height) =
-            crate::linux::media::scaled_size(probe.width, probe.height, CANDIDATE_EDGE as u32);
-        let interval = sample_interval_ms(probe.duration_ms, width as usize * height as usize * 4);
-        let mut frames = crate::helper::frames(
-            &self.video,
-            FrameTimes::Every(interval),
-            CANDIDATE_EDGE as u32,
-        )
-        .with_context(unusable)?;
-        if frames.is_empty() {
-            bail!("No frames could be decoded from {}", self.video.display());
-        }
-        let urgent = thin_evenly(
-            urgent_frame_times(events, strokes, self.video_offset_ms, probe.duration_ms),
-            urgent_frame_cap(width as usize * height as usize * 4),
-        );
-        let wanted: Vec<u64> = urgent
-            .into_iter()
-            .filter(|t| frames.iter().all(|f| f.t_ms != *t))
-            .collect();
-        if !wanted.is_empty() {
-            frames.extend(decode_urgent(&self.video, &wanted));
-            frames.sort_by_key(|f| f.t_ms);
-        }
-        for frame in &mut frames {
-            frame.t_ms += self.video_offset_ms;
-        }
+        crate::helper::probe(&self.video)
+            .with_context(|| format!("The recording file {} was unusable", self.video.display()))?;
         Ok(ScreenRecording {
-            frames,
+            frames: Vec::new(),
             video: Some(self.video.clone()),
             duration_ms,
             video_offset_ms: self.video_offset_ms,
         })
     }
+}
+
+/// The placeholder frame for a capture whose video gave no frames, as on macOS.
+pub fn placeholder_frame() -> RgbaFrame {
+    crate::render::render_synthetic_demo_frame(1280, 800, 0, 0)
+}
+
+/// The candidate frames of a recording `stop` left without any: those every
+/// `sample_interval_ms`, plus one shortly after each click and drag in `events` and each stroke
+/// end in `strokes`, on the capture clock. `frames` that are already there are returned as
+/// they are, and so are they when there is no video; a video that gives no frames is logged
+/// and leaves the placeholder.
+pub fn fill_candidates(
+    frames: Vec<RgbaFrame>,
+    video: Option<&Path>,
+    video_offset_ms: u64,
+    events: &[InteractionEvent],
+    strokes: &[Stroke],
+) -> Vec<RgbaFrame> {
+    let Some(video) = video.filter(|_| frames.is_empty()) else {
+        return frames;
+    };
+    let began = Instant::now();
+    match candidate_frames(video, video_offset_ms, events, strokes) {
+        Ok(frames) => {
+            crate::capture::scrawl_log(format!(
+                "Candidate frames: {} decoded in {} ms",
+                frames.len(),
+                began.elapsed().as_millis()
+            ));
+            frames
+        }
+        Err(error) => {
+            crate::capture::scrawl_log(format!("Screen recording: {error:#}"));
+            vec![placeholder_frame()]
+        }
+    }
+}
+
+fn candidate_frames(
+    video: &Path,
+    video_offset_ms: u64,
+    events: &[InteractionEvent],
+    strokes: &[Stroke],
+) -> Result<Vec<RgbaFrame>> {
+    let unusable = || format!("The recording file {} was unusable", video.display());
+    let probe = crate::helper::probe(video).with_context(unusable)?;
+    let (width, height) =
+        crate::linux::media::scaled_size(probe.width, probe.height, CANDIDATE_EDGE as u32);
+    let frame_bytes = width as usize * height as usize * 4;
+    let interval = sample_interval_ms(probe.duration_ms, frame_bytes);
+    let urgent = thin_evenly(
+        urgent_frame_times(events, strokes, video_offset_ms, probe.duration_ms),
+        urgent_frame_cap(frame_bytes),
+    );
+    let edge = CANDIDATE_EDGE as u32;
+    let mut frames = crate::linux::media::sampled_frames(video, interval, &urgent, edge)
+        .or_else(|error| {
+            // The sampled frames alone are still a keyframe selection.
+            crate::capture::scrawl_log(format!("No frames after the clicks and ink: {error:#}"));
+            crate::helper::frames(video, FrameTimes::Every(interval), edge)
+        })
+        .with_context(unusable)?;
+    if frames.is_empty() {
+        bail!("No frames could be decoded from {}", video.display());
+    }
+    for frame in &mut frames {
+        frame.t_ms += video_offset_ms;
+    }
+    Ok(frames)
 }
 
 impl Drop for ScreenSession {
@@ -467,7 +492,10 @@ mod tests {
             label: None,
         };
         let events = [click(9_900), click(9_950), scroll, click(0)];
-        assert_eq!(urgent_frame_times(&events, &[], 500, 9_680), vec![0, 9_650, 9_680]);
+        assert_eq!(
+            urgent_frame_times(&events, &[], 500, 9_680),
+            vec![0, 9_650, 9_680]
+        );
         assert!(urgent_frame_times(&[], &[], 0, 10_000).is_empty());
     }
 
@@ -487,6 +515,71 @@ mod tests {
         assert!(urgent_frame_cap(frame) * frame <= CANDIDATE_BUDGET_BYTES / 4);
         assert!(urgent_frame_cap(frame) > 100);
         assert_eq!(urgent_frame_cap(usize::MAX), 1);
+    }
+
+    /// A 3 s test pattern movie in a fresh temp directory (needs `ffmpeg`).
+    fn test_movie(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("scrawl-record-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let movie = dir.join("t.mp4");
+        let made = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=30",
+            ])
+            .args(["-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&movie)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        (dir, movie)
+    }
+
+    #[test]
+    fn candidates_are_decoded_on_the_capture_clock_with_one_after_each_click() {
+        let (dir, movie) = test_movie("fill");
+        let offset = 500;
+        // Movie time 1 650 + 250 = 1 900 is between two sampled frames (220 ms apart).
+        let frames = fill_candidates(
+            Vec::new(),
+            Some(&movie),
+            offset,
+            &[click(1_900 + offset - 250)],
+            &[],
+        );
+        assert!(frames.len() > 10, "{} frames", frames.len());
+        assert!(frames.windows(2).all(|w| w[0].t_ms <= w[1].t_ms));
+        assert_eq!(frames[0].t_ms, offset);
+        assert!(
+            frames.iter().any(|f| f.t_ms == 1_900 + offset),
+            "no frame after the click"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn candidates_already_there_or_without_a_video_are_left_alone() {
+        let kept = vec![RgbaFrame::new(7, 2, 2, vec![0; 16])];
+        let frames = fill_candidates(kept, Some(Path::new("/nonexistent/t.mp4")), 0, &[], &[]);
+        assert_eq!(frames.iter().map(|f| f.t_ms).collect::<Vec<_>>(), vec![7]);
+        assert!(fill_candidates(Vec::new(), None, 0, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_video_that_cannot_be_decoded_leaves_the_placeholder_frame() {
+        let dir = std::env::temp_dir().join(format!("scrawl-record-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let movie = dir.join("t.mp4");
+        std::fs::write(&movie, b"not a movie").unwrap();
+        let frames = fill_candidates(Vec::new(), Some(&movie), 0, &[], &[]);
+        assert_eq!(frames.len(), 1);
+        assert_eq!((frames[0].width, frames[0].height), (1280, 800));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

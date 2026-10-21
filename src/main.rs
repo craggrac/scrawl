@@ -837,7 +837,7 @@ pub fn finalize_capture_bundle(
     let crop_settings = (target.mode == CaptureMode::Display)
         .then(autocrop::Settings::configured)
         .flatten();
-    let ((transcript, transcribe_ms), (predecoded, prepared)) = std::thread::scope(|scope| {
+    let ((transcript, transcribe_ms), (predecoded, prepared), frames) = std::thread::scope(|scope| {
         let transcribe_handle = scope.spawn(|| {
             let t0 = std::time::Instant::now();
             let tr = transcribe::transcribe(
@@ -846,6 +846,16 @@ pub fn finalize_capture_bundle(
             );
             (tr, t0.elapsed().as_millis() as u64)
         });
+        // Linux stops its recorder without decoding the candidate frames; they are decoded here,
+        // while the narration is transcribed.
+        #[cfg(target_os = "linux")]
+        let frames = crate::linux::record::fill_candidates(
+            frames,
+            video_path.as_deref(),
+            video_offset_ms,
+            &events,
+            &strokes,
+        );
         let pre = if let Some(ref movie) = video_path
             && !frames.is_empty()
         {
@@ -891,7 +901,7 @@ pub fn finalize_capture_bundle(
         } else {
             (Vec::new(), None)
         };
-        (transcribe_handle.join().unwrap(), pre)
+        (transcribe_handle.join().unwrap(), pre, frames)
     });
 
     build_bundle_from_parts(

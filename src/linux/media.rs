@@ -174,7 +174,8 @@ fn decode(
         command.args(["-ss", &format!("{:.3}", ms as f64 / 1_000.0)]);
     }
     input(&mut command, movie);
-    command.args(["-an", "-vf", filter]);
+    // Every frame the filter lets through is written once, at whatever time it has.
+    command.args(["-an", "-fps_mode", "passthrough", "-vf", filter]);
     if let Some(limit) = limit {
         command.args(["-frames:v", &limit.to_string()]);
     }
@@ -300,6 +301,107 @@ pub fn frames(movie: &Path, times: FrameTimes, max_edge: u32) -> Result<Vec<Rgba
     }
 }
 
+/// The presentation time of each frame of `movie`'s video, in ms, oldest first.
+fn frame_times(movie: &Path) -> Result<Vec<f64>> {
+    let mut command = Command::new("ffprobe");
+    command
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "packet=pts_time", "-of", "csv=p=0"]);
+    input(&mut command, movie);
+    let out = run(command, "ffprobe", Duration::from_secs(60))?;
+    let mut times: Vec<f64> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.trim().trim_end_matches(',').parse::<f64>().ok())
+        .map(|seconds| seconds * 1_000.0)
+        .collect();
+    times.sort_by(f64::total_cmp);
+    Ok(times)
+}
+
+/// The frame to show at each of `ticks` ms apart (`count` of them, the first at 0): the last
+/// one shown by then, as the `fps` filter holds a frame, and the first frame before it has
+/// been. `times` are the frames' times, oldest first.
+fn grid_indexes(times: &[f64], ticks: u64, count: u64) -> Vec<usize> {
+    (0..count)
+        .map(|k| {
+            let by = (k * ticks) as f64 + ticks as f64 / 2.0;
+            times.partition_point(|&t| t <= by).saturating_sub(1)
+        })
+        .collect()
+}
+
+/// The first frame at or after `t` ms, else the last (a time at or past the end).
+fn first_from(times: &[f64], t: u64) -> usize {
+    times
+        .partition_point(|&time| time < t as f64)
+        .min(times.len() - 1)
+}
+
+/// The frames of `movie` every `every_ms` (stamped `0, every_ms, ...`) and at each of `at` (an
+/// exact time that is not one of those; the first frame from it on), with a long edge of at
+/// most `max_edge`, sorted by time. Both come from one pass over the movie: a seek for each of
+/// `at` decodes from the last key frame before it, which for a few dozen times costs more than
+/// the whole movie. The frames to keep are picked by number from the times `ffprobe` lists.
+pub fn sampled_frames(
+    movie: &Path,
+    every_ms: u64,
+    at: &[u64],
+    max_edge: u32,
+) -> Result<Vec<RgbaFrame>> {
+    let probe = probe(movie)?;
+    ensure!(
+        probe.width > 0 && probe.height > 0,
+        "{} has no video",
+        movie.display()
+    );
+    let every_ms = every_ms.max(1);
+    let times = frame_times(movie)?;
+    ensure!(!times.is_empty(), "{} has no video frames", movie.display());
+    let count = probe.duration_ms.div_ceil(every_ms).max(1);
+    let mut wanted: Vec<(u64, usize)> = grid_indexes(&times, every_ms, count)
+        .into_iter()
+        .enumerate()
+        .map(|(k, index)| (k as u64 * every_ms, index))
+        .collect();
+    wanted.extend(
+        at.iter()
+            .filter(|&&t| t % every_ms != 0 || t / every_ms >= count)
+            .map(|&t| (t, first_from(&times, t))),
+    );
+    let mut picked: Vec<usize> = wanted.iter().map(|&(_, index)| index).collect();
+    picked.sort_unstable();
+    picked.dedup();
+    let size = scaled_size(probe.width, probe.height, max_edge);
+    // ffmpeg's expression parser fails on a flat sum of more than a hundred terms or so.
+    let select = picked
+        .chunks(32)
+        .map(|run| {
+            let terms: Vec<String> = run.iter().map(|index| format!("eq(n,{index})")).collect();
+            format!("({})", terms.join("+"))
+        })
+        .collect::<Vec<_>>()
+        .join("+");
+    let filter = format!("select='{select}',scale={}:{}:flags=area", size.0, size.1);
+    let deadline = DECODE_DEADLINE.max(Duration::from_millis(probe.duration_ms.saturating_mul(2)));
+    let decoded = decode(movie, None, &filter, size, None, deadline)?;
+    ensure!(
+        decoded.len() == picked.len(),
+        "ffmpeg gave {} of {} frames from {}",
+        decoded.len(),
+        picked.len(),
+        movie.display()
+    );
+    let mut frames: Vec<RgbaFrame> = wanted
+        .into_iter()
+        .map(|(t, index)| {
+            let rgba = &decoded[picked.binary_search(&index).expect("picked")];
+            RgbaFrame::new(t, size.0, size.1, rgba.clone())
+        })
+        .collect();
+    frames.sort_by_key(|frame| frame.t_ms);
+    Ok(frames)
+}
+
 /// Mixes a movie's audio to 16 kHz mono WAV, aligned to the movie's start: a late-starting audio
 /// track is padded with silence rather than shifted earlier.
 pub fn export_audio(movie: &Path, wav: &Path) -> Result<()> {
@@ -407,6 +509,81 @@ mod tests {
             export_audio(&movie, &wav).is_err(),
             "no audio track to export"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A test pattern movie of `seconds` at 30 fps, in a fresh temp directory (needs `ffmpeg`).
+    fn test_pattern(name: &str, seconds: u32) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("scrawl-media-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let movie = dir.join("t.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=30",
+            ])
+            .args([
+                "-t",
+                &seconds.to_string(),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&movie)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        (dir, movie)
+    }
+
+    /// The one-pass frames are the ones the separate `Every` pass and seeks decode.
+    #[test]
+    fn sampled_frames_are_those_of_the_every_pass_and_the_seeks() {
+        let (dir, movie) = test_pattern("sampled", 3);
+        let every = frames(&movie, FrameTimes::Every(500), 160).unwrap();
+        let at = frames(&movie, FrameTimes::At(&[110, 1_234, 2_000]), 160).unwrap();
+        // 1 000 is on the grid already; 2 000 too.
+        let sampled = sampled_frames(&movie, 500, &[110, 1_000, 1_234, 2_000, 9_999], 160).unwrap();
+        assert_eq!(
+            sampled.iter().map(|f| f.t_ms).collect::<Vec<_>>(),
+            vec![0, 110, 500, 1_000, 1_234, 1_500, 2_000, 2_500, 9_999]
+        );
+        for frame in &sampled[..8] {
+            let same = every
+                .iter()
+                .chain(&at)
+                .find(|f| f.t_ms == frame.t_ms)
+                .unwrap();
+            assert!(
+                same.rgba == frame.rgba,
+                "frame at {} ms differs",
+                frame.t_ms
+            );
+        }
+        // A time past the end is the last frame.
+        let past = frames(&movie, FrameTimes::At(&[9_999]), 160).unwrap();
+        assert!(sampled[8].rgba == past[0].rgba);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Hundreds of frames make a long `select` expression; ffmpeg takes it.
+    #[test]
+    fn sampled_frames_take_hundreds_of_frames_in_one_pass() {
+        let (dir, movie) = test_pattern("many", 24);
+        let at: Vec<u64> = (0..100).map(|i| 17 + i * 233).collect();
+        let sampled = sampled_frames(&movie, 40, &at, 80).unwrap();
+        // Two of the times fall on the 40 ms grid.
+        assert_eq!(
+            sampled.len(),
+            600 + at.iter().filter(|t| *t % 40 != 0).count()
+        );
+        assert!(sampled.windows(2).all(|w| w[0].t_ms <= w[1].t_ms));
         let _ = std::fs::remove_dir_all(dir);
     }
 
