@@ -133,6 +133,63 @@ This needs read access to `/dev/input/event*`, which on most distributions means
 works, just without these events. Touchpad taps and two-finger scrolling are not seen (libinput
 synthesizes them above evdev); physical buttons and mouse wheels are.
 
+### Browser and project context
+
+Linux only. With **Browser and project context** on (Settings › Recording, or `"devContext": true` in
+`~/.config/scrawl/config.json`; off by default), a recording also writes down what the browser and
+the project were doing, on the capture's clock, in `scrawl.json` (`devContext`) and as a short
+`Context:` block at the end of `summary.md`, so the agent doesn't have to ask what the console said:
+
+```
+Context:
+· 0:00 page localhost:3000/tabs
+· 0:07 console error: TypeError: Cannot read properties of undefined (reading 'map') (/src/List.tsx:42:17)
+· 0:09 POST /api/tabs → 500
+· repo scrawl @ main 42be30e “Add tabs” (3 changed: M src/List.tsx, ?? notes.txt, +1)
+```
+
+- **Browser (needs remote debugging).** Scrawl attaches only to a browser that already exposes the Chrome
+  DevTools Protocol: it looks for the `DevToolsActivePort` file Chromium-based browsers (Chrome, Chromium,
+  Brave, Helium, Electron apps) write in their profile folder under `~/.config`, and for a port named in
+  `config.json` (`"cdpPort": 9222`) when the profile is somewhere else. It never starts, restarts or
+  reconfigures a browser and never writes to a profile. Without a debugging port it records nothing from
+  the browser and says so once in the log (`Dev context: no browser exposes DevTools`).
+- **How to turn it on, and what it costs.** Start the browser with `--remote-debugging-port=9222`, for
+  example `helium --remote-debugging-port=9222` (a launcher script, a flags file such as
+  `~/.config/chromium-flags.conf`, or the `.desktop` file's `Exec=` line; Brave and Chrome take the same
+  flag). **Security tradeoff: any process on this computer can then connect to that port and read, drive
+  and script every tab, including your logged-in sessions.** Google Chrome 136 and later also ignore the
+  flag for the default profile folder (other Chromium-based browsers may do the same), so it can take a
+  non-default `--user-data-dir` as well, which is a separate profile; if no `DevToolsActivePort` file
+  appears in the profile folder, the flag wasn't honoured. If you don't want that exposure, leave the
+  browser alone: you lose only the browser part. `--remote-debugging-port=0` picks a free port and still
+  writes the file, which is all Scrawl needs.
+- **What it reads.** Only the event domains `Runtime`, `Log` and `Network` (plus `Target` to find the tab),
+  none of the page's content: console errors and warnings (with the top stack frame), uncaught exceptions,
+  requests that failed or answered 400 and up (method, address, status or the browser's reason; not the
+  favicon), and the tab's address as it changes. It follows the tab whose title the focused window shows
+  (the one last in front, if you go to a terminal) and listens to that one only. Repeats are counted, not
+  repeated; at most 40 console and 40 network entries and 20 page changes are kept, strings cut to 300
+  characters.
+- **The terminal and the project.** When the window in front is a terminal, the folder its foreground shell
+  or program is in (through `/proc`; a terminal with several tabs in different folders gives none). For a
+  `localhost` page, the folder of the process listening on that port. For each folder in a git repository
+  (up to 4): its root, branch, head commit and subject, and the changed files from
+  `git status --porcelain` (12 named, all counted). The folder is not trusted, so its repository's
+  configuration must not run anything: `git` runs read-only (`--no-optional-locks`) with every setting
+  that names a program overridden (`fsmonitor`, hooks, pager, external diff, gpg, ssh), the system config
+  ignored, at low priority, under a 2 s timeout; and because `git status` reads the working tree and so
+  runs `filter.*.clean` programs, the changed files are left out for a repository whose own config
+  defines any `filter.*` (the branch, head and subject are still given). Scrollback is not read: a
+  terminal's output can't be captured reliably, so it isn't.
+- **Privacy.** Everything stays in the bundle on this computer. Credentials in addresses, query values and
+  fragments with token-like names or shapes, and obvious secrets in console messages (`Authorization:
+  Bearer …`, `password=…`, JWTs, `sk-…`/`ghp_…` keys) are replaced with `REDACTED` before they are written.
+  It is a filter, not a guarantee: the summary goes to your agent, so skim it as you would any paste.
+- **Cost.** The collector is one background thread (the focused window every 250 ms, the browser's events as
+  they come) and nothing waits on the browser; at stop it adds tens of milliseconds, plus up to 1.5 s if a
+  repository is still being read (normally none). The time is logged (`Dev context: … stopped in N ms`).
+
 ## Agents
 
 Install the agent skill for Claude Code, OpenCode, Codex and other agents:
