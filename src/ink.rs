@@ -68,12 +68,34 @@ mod tracker {
     use crate::linux::input::{
         BTN_LEFT, CursorSource, EV_KEY, EV_SYN, Modifiers, RawEvent, SYN_DROPPED,
     };
-    use crate::model::{SCALE, Stroke, TargetFrame};
+    use crate::model::{InkColor, InkShape, SCALE, Stroke, TargetFrame};
 
     /// A point is added to live ink only when this far (points) from the last one.
     const MIN_POINT_GAP_PT: f32 = 1.5;
     /// Points in one stroke; past it a stroke stops growing.
     const MAX_STROKE_POINTS: usize = 2_400;
+    const KEY_Z: u16 = 44;
+
+    /// The ink colour ⇧ + 1 to 4 pick.
+    fn color_for_key(code: u16) -> Option<InkColor> {
+        match code {
+            2 => Some(InkColor::Red),
+            3 => Some(InkColor::Yellow),
+            4 => Some(InkColor::Green),
+            5 => Some(InkColor::Blue),
+            _ => None,
+        }
+    }
+
+    /// What the held ⇧ draws, by the modifier next to it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Pen {
+        /// ⇧ alone: ink follows the pointer.
+        Freehand,
+        /// ⇧ + Ctrl draws an arrow, ⇧ + Alt a box, from where the modifier went down to the
+        /// pointer.
+        Figure(InkShape),
+    }
 
     /// An `eventfd` the overlay waits on next to its Wayland connection; whoever changes the ink
     /// writes it. It does nothing until an overlay attaches one.
@@ -123,21 +145,27 @@ mod tracker {
         pub shift_held: Arc<AtomicBool>,
         /// The pointer in global points while ⇧ is held.
         pub pointer: Arc<Mutex<[f32; 2]>>,
+        /// The colour the next stroke gets (the tip dot shows it).
+        pub color: Arc<Mutex<InkColor>>,
         pub wake: Arc<Wake>,
     }
 
-    /// Turns evdev key events and the cursor into ink, as macOS' HID poller does: while only ⇧
-    /// is held and the pointer is inside the target it draws a stroke; ⇧ with ctrl, alt or
-    /// super draws nothing until ⇧ is released; releasing ⇧ keeps the stroke if it is real ink;
-    /// a ⇧-press let go on the spot is a numbered pin. Holds no device (`Gestures`' rig).
+    /// Turns evdev key events and the cursor into ink, as macOS' HID poller does: while ⇧ is
+    /// held and the pointer is inside the target it draws a stroke (`Pen`: ⇧ alone is freehand,
+    /// with Ctrl an arrow, with Alt a box); ⇧ with super, or with Ctrl and Alt both, draws
+    /// nothing until ⇧ is released; releasing ⇧ keeps the stroke if it is real ink; a ⇧-press
+    /// let go on the spot is a numbered pin. ⇧ + 1 to 4 pick the colour of the strokes after, and
+    /// Ctrl+Z (⌘Z on macOS) takes back the last stroke or pin. Holds no device (`Gestures`' rig).
     pub struct InkTracker {
         frame: TargetFrame,
         state: InkState,
         mods: Modifiers,
-        /// ⇧ went down with ctrl, alt or super: no ink until it is released.
+        /// ⇧ went down with a modifier that is a shortcut's: no ink until it is released.
         await_shift_release: bool,
-        /// Only ⇧ was held at the last look.
-        drawing: bool,
+        /// What ⇧ was drawing at the last look.
+        drawing: Option<Pen>,
+        /// The colour of the strokes that begin from now on.
+        color: InkColor,
         /// A ⇧-press inside the target: when, and where (global points).
         press: Option<(u64, f64, f64)>,
         snapshot: bool,
@@ -147,12 +175,15 @@ mod tracker {
 
     impl InkTracker {
         pub fn new(frame: TargetFrame, state: InkState) -> Self {
+            // Each capture starts in red.
+            *state.color.lock().unwrap_or_else(PoisonError::into_inner) = InkColor::Red;
             Self {
                 frame,
                 state,
                 mods: Modifiers::default(),
                 await_shift_release: false,
-                drawing: false,
+                drawing: None,
+                color: InkColor::Red,
                 press: None,
                 snapshot: false,
                 last_look: None,
@@ -172,9 +203,9 @@ mod tracker {
             std::mem::take(&mut self.snapshot)
         }
 
-        /// Only ⇧ is held, as of the last look: the pointer wants sampling often.
+        /// ⇧ is drawing, as of the last look: the pointer wants sampling often.
         pub fn drawing(&self) -> bool {
-            self.drawing
+            self.drawing.is_some()
         }
 
         /// ⇧ is held and drawing inside the target.
@@ -225,6 +256,8 @@ mod tracker {
                 EV_KEY => {
                     if self.mods.set(raw.code, raw.value != 0) {
                         self.look(t, cursor);
+                    } else if raw.value == 1 {
+                        self.key_down(raw.code);
                     }
                 }
                 EV_SYN if raw.code == SYN_DROPPED => self.reset(),
@@ -249,7 +282,7 @@ mod tracker {
         /// The capture ends: ink being drawn is kept.
         pub fn finish(&mut self) {
             self.press = None;
-            self.drawing = false;
+            self.drawing = None;
             self.state.shift_held.store(false, Ordering::Release);
             let live = self
                 .state
@@ -257,8 +290,9 @@ mod tracker {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .take();
+            // A figure needs both of its ends; freehand ink is kept from its first point.
             if let Some(stroke) = live
-                && stroke.pts.len() >= 3
+                && stroke.pts.len() >= if stroke.shape.is_some() { 6 } else { 3 }
             {
                 self.state
                     .strokes
@@ -334,17 +368,31 @@ mod tracker {
             self.state.wake.notify();
         }
 
-        /// One look at the modifiers and the pointer: the body of macOS' poller loop.
-        fn look(&mut self, t: u64, cursor: CursorSource<'_>) {
-            let shift = self.mods.shift();
-            let others = self.mods.ctrl() || self.mods.alt() || self.mods.meta();
-            if !shift {
+        /// What ⇧ draws now, if it draws: ⇧ with super, or with Ctrl and Alt together, is
+        /// a shortcut's (and stays so until it is released).
+        fn pen(&mut self) -> Option<Pen> {
+            let (ctrl, alt) = (self.mods.ctrl(), self.mods.alt());
+            if !self.mods.shift() {
                 self.await_shift_release = false;
-            } else if others {
+                return None;
+            }
+            if self.mods.meta() || (ctrl && alt) {
                 self.await_shift_release = true;
             }
-            let only_shift = shift && !others && !self.await_shift_release;
-            if only_shift {
+            if self.await_shift_release {
+                return None;
+            }
+            Some(match (ctrl, alt) {
+                (true, _) => Pen::Figure(InkShape::Arrow),
+                (_, true) => Pen::Figure(InkShape::Box),
+                _ => Pen::Freehand,
+            })
+        }
+
+        /// One look at the modifiers and the pointer: the body of macOS' poller loop.
+        fn look(&mut self, t: u64, cursor: CursorSource<'_>) {
+            let pen = self.pen();
+            if let Some(pen) = pen {
                 self.last_look = Some(t);
                 let Some((x, y)) = cursor() else { return };
                 *self
@@ -352,34 +400,89 @@ mod tracker {
                     .pointer
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = [x as f32, y as f32];
+                // A different modifier is a different figure: the stroke so far is done.
+                if self.drawing.is_some_and(|before| before != pen) {
+                    self.end_stroke();
+                }
                 if self.contains(x, y) {
                     self.state.shift_held.store(true, Ordering::Release);
-                    self.draw(t, x, y);
+                    self.draw(t, x, y, pen);
                 }
                 self.state.wake.notify();
-            } else if self.drawing {
+            } else if self.drawing.is_some() {
                 self.state.shift_held.store(false, Ordering::Release);
-                let live = self
-                    .state
-                    .live
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .take();
-                // A stationary ⇧ tap (a capital letter typed) is not a stroke.
-                if let Some(stroke) = live.filter(is_real_ink) {
-                    self.state
-                        .strokes
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(stroke);
-                }
+                self.end_stroke();
                 self.state.wake.notify();
             }
-            self.drawing = only_shift;
+            self.drawing = pen;
         }
 
-        /// Adds the pointer's point to the live stroke.
-        fn draw(&mut self, t: u64, x: f64, y: f64) {
+        /// Ends the live stroke, keeping it if it is real ink: a stationary ⇧ tap (a capital
+        /// letter typed) is not a stroke.
+        fn end_stroke(&mut self) {
+            let live = self
+                .state
+                .live
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(stroke) = live.filter(is_real_ink) {
+                self.state
+                    .strokes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(stroke);
+            }
+        }
+
+        /// A key that is not a modifier went down: ⇧ + 1 to 4 pick the colour (not with
+        /// super, which has its own binds on the digits), Ctrl+Z undoes. Evdev only watches, so
+        /// the focused app gets these keys as well.
+        fn key_down(&mut self, code: u16) {
+            if let Some(color) = color_for_key(code)
+                && self.mods.shift()
+                && !self.mods.meta()
+            {
+                self.pick_color(color);
+            } else if code == KEY_Z
+                && self.mods.ctrl()
+                && !(self.mods.shift() || self.mods.alt() || self.mods.meta())
+            {
+                self.undo();
+            }
+        }
+
+        /// The strokes from here on are `color`; the one being drawn is done, so each colour
+        /// is its own stroke.
+        fn pick_color(&mut self, color: InkColor) {
+            self.color = color;
+            *self
+                .state
+                .color
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = color;
+            self.end_stroke();
+            self.state.wake.notify();
+        }
+
+        /// Takes back the last stroke or pin, as the capsule's Undo does (`laser` strokes are
+        /// not ink).
+        fn undo(&mut self) {
+            let mut strokes = self
+                .state
+                .strokes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(last) = strokes.iter().rposition(|s| !s.laser) {
+                strokes.remove(last);
+            }
+            drop(strokes);
+            self.state.wake.notify();
+        }
+
+        /// Adds the pointer's point to the live stroke: a freehand stroke follows it, a figure
+        /// keeps its first point and moves its second.
+        fn draw(&mut self, t: u64, x: f64, y: f64, pen: Pen) {
             let (nx, ny, fw, fh) = self.normalize(x, y);
             let sx = (nx * SCALE as f32).round() as i32;
             let sy = (ny * SCALE as f32).round() as i32;
@@ -399,11 +502,20 @@ mod tracker {
                 on: None,
                 pin: None,
                 laser: false,
-                color: Default::default(),
-                shape: None,
+                color: self.color,
+                shape: match pen {
+                    Pen::Freehand => None,
+                    Pen::Figure(shape) => Some(shape),
+                },
                 pts: Vec::new(),
             });
             let dt = t.saturating_sub(stroke.t0) as i32;
+            if stroke.shape.is_some() {
+                stroke.pts.truncate(3);
+                stroke.pts.extend_from_slice(&[sx, sy, dt]);
+                stroke.t1 = t;
+                return;
+            }
             let far_enough = stroke.pts.chunks_exact(3).last().is_none_or(|prev| {
                 let dx = (sx - prev[0]) as f32 / SCALE as f32 * fw as f32;
                 let dy = (sy - prev[1]) as f32 / SCALE as f32 * fh as f32;
@@ -427,6 +539,11 @@ mod tracker {
         const CTRL: u16 = 29;
         const ALT: u16 = 56;
         const SUPER: u16 = 125;
+        const KEY_1: u16 = 2;
+        const KEY_2: u16 = 3;
+        const KEY_3: u16 = 4;
+        const KEY_4: u16 = 5;
+        const Z: u16 = 44;
 
         fn frame() -> TargetFrame {
             TargetFrame {
@@ -627,35 +744,277 @@ mod tracker {
         }
 
         #[test]
-        fn shift_with_ctrl_alt_or_super_draws_nothing_until_shift_is_let_go() {
-            for other in [CTRL, ALT, SUPER] {
+        fn shift_with_super_or_with_ctrl_and_alt_draws_nothing_until_shift_is_let_go() {
+            for others in [vec![SUPER], vec![CTRL, ALT]] {
                 let mut rig = Rig::new();
-                rig.feed(0, key(other, 1));
+                for &other in &others {
+                    rig.feed(0, key(other, 1));
+                }
                 rig.feed(5, key(SHIFT, 1));
                 draw_line(&mut rig, 8, 6);
-                assert!(rig.live().is_none(), "{other}");
-                // Letting go of the other key is not enough...
-                rig.feed(100, key(other, 0));
+                assert!(rig.live().is_none(), "{others:?}");
+                // Letting go of the others is not enough...
+                for &other in &others {
+                    rig.feed(100, key(other, 0));
+                }
                 draw_line(&mut rig, 108, 6);
-                assert!(rig.live().is_none(), "{other} released, shift still down");
+                assert!(
+                    rig.live().is_none(),
+                    "{others:?} released, shift still down"
+                );
                 // ...only ⇧'s own release (and a new press) is.
                 rig.feed(200, key(SHIFT, 0));
                 rig.feed(210, key(SHIFT, 1));
                 draw_line(&mut rig, 218, 6);
-                assert!(rig.live().is_some(), "{other}");
+                assert!(rig.live().is_some(), "{others:?}");
             }
         }
 
         #[test]
-        fn a_modifier_added_to_shift_ends_the_stroke_being_drawn() {
+        fn a_super_added_to_shift_ends_the_stroke_being_drawn() {
             let mut rig = Rig::new();
             rig.feed(0, key(SHIFT, 1));
             let t = draw_line(&mut rig, 8, 8);
-            rig.feed(t, key(CTRL, 1));
+            rig.feed(t, key(SUPER, 1));
             assert!(rig.live().is_none());
             assert_eq!(rig.strokes().len(), 1);
             draw_line(&mut rig, t + 8, 6);
             assert_eq!(rig.strokes().len(), 1);
+        }
+
+        /// ⇧ and `modifier` down at (600, 300), the pointer to (800, 400) and (900, 350).
+        fn drag_figure(rig: &mut Rig, modifier: u16) {
+            rig.feed(0, key(modifier, 1));
+            rig.feed(10, key(SHIFT, 1));
+            rig.move_to(20, (800.0, 400.0));
+            rig.move_to(40, (900.0, 350.0));
+        }
+
+        #[test]
+        fn shift_and_ctrl_draw_an_arrow_from_where_they_went_down_to_the_pointer() {
+            let mut rig = Rig::new();
+            drag_figure(&mut rig, CTRL);
+            let live = rig.live().expect("a live arrow");
+            let s = crate::model::SCALE;
+            assert_eq!(live.shape, Some(InkShape::Arrow));
+            assert_eq!(live.color, InkColor::Red);
+            assert_eq!((live.t0, live.t1), (10, 40));
+            // Two points: where ⇧ went down (0.5, 0.5) and the pointer now (0.8, 0.7).
+            assert_eq!(live.pts, vec![s / 2, s / 2, 0, s * 8 / 10, s * 6 / 10, 30]);
+            assert!(rig.tracker.shift_held());
+            // Letting go keeps it as one stroke of two points.
+            rig.feed(60, key(SHIFT, 0));
+            assert!(rig.live().is_none());
+            let strokes = rig.strokes();
+            assert_eq!(strokes.len(), 1);
+            assert_eq!(strokes[0].shape, Some(InkShape::Arrow));
+            assert_eq!(strokes[0].pts.len(), 6);
+        }
+
+        #[test]
+        fn shift_and_alt_draw_a_box_between_two_corners() {
+            let mut rig = Rig::new();
+            drag_figure(&mut rig, ALT);
+            let live = rig.live().expect("a live box");
+            assert_eq!(live.shape, Some(InkShape::Box));
+            assert_eq!(live.pts.len(), 6);
+            rig.feed(60, key(SHIFT, 0));
+            assert_eq!(rig.strokes()[0].shape, Some(InkShape::Box));
+        }
+
+        #[test]
+        fn a_figure_that_goes_nowhere_is_not_kept() {
+            let mut rig = Rig::new();
+            rig.feed(0, key(CTRL, 1));
+            rig.feed(10, key(SHIFT, 1));
+            rig.move_to(20, (602.0, 301.0));
+            rig.feed(60, key(SHIFT, 0));
+            assert!(rig.strokes().is_empty());
+            // And one the capture ends in with only its first point is dropped, too.
+            let mut rig = Rig::new();
+            rig.feed(0, key(ALT, 1));
+            rig.feed(10, key(SHIFT, 1));
+            assert_eq!(rig.live().unwrap().pts.len(), 3);
+            rig.tracker.finish();
+            assert!(rig.strokes().is_empty());
+        }
+
+        #[test]
+        fn changing_the_modifier_while_drawing_starts_a_new_stroke_of_the_new_kind() {
+            let mut rig = Rig::new();
+            rig.feed(0, key(SHIFT, 1));
+            let t = draw_line(&mut rig, 8, 8);
+            // Ctrl down: the freehand stroke ends and an arrow begins at the pointer.
+            rig.at.set(Some((690.0, 300.0)));
+            rig.feed(t, key(CTRL, 1));
+            assert_eq!(rig.strokes().len(), 1);
+            assert_eq!(rig.strokes()[0].shape, None);
+            assert_eq!(rig.live().unwrap().shape, Some(InkShape::Arrow));
+            rig.move_to(t + 20, (900.0, 400.0));
+            // Ctrl up: the arrow is kept and ⇧ draws freehand again.
+            rig.feed(t + 40, key(CTRL, 0));
+            assert_eq!(rig.strokes().len(), 2);
+            assert_eq!(rig.strokes()[1].shape, Some(InkShape::Arrow));
+            assert_eq!(rig.live().unwrap().shape, None);
+        }
+
+        #[test]
+        fn shift_with_1_to_4_picks_the_colour_of_the_strokes_after() {
+            let mut rig = Rig::new();
+            rig.feed(0, key(SHIFT, 1));
+            let t = draw_line(&mut rig, 8, 8);
+            assert_eq!(rig.live().unwrap().color, InkColor::Red);
+            // The key ends the stroke in its colour; the next point starts one in the new.
+            rig.feed(t, key(KEY_2, 1));
+            assert_eq!(*rig.state.color.lock().unwrap(), InkColor::Yellow);
+            assert_eq!(rig.strokes().len(), 1);
+            assert_eq!(rig.strokes()[0].color, InkColor::Red);
+            assert!(rig.live().is_none());
+            let t = draw_line(&mut rig, t + 8, 8);
+            assert_eq!(rig.live().unwrap().color, InkColor::Yellow);
+            // It stays picked across strokes, until another is.
+            rig.feed(t, key(SHIFT, 0));
+            rig.feed(t + 10, key(SHIFT, 1));
+            let t = draw_line(&mut rig, t + 20, 8);
+            assert_eq!(rig.live().unwrap().color, InkColor::Yellow);
+            for (pick, color) in [
+                (KEY_3, InkColor::Green),
+                (KEY_4, InkColor::Blue),
+                (KEY_1, InkColor::Red),
+            ] {
+                rig.feed(t, key(pick, 1));
+                assert_eq!(*rig.state.color.lock().unwrap(), color);
+            }
+        }
+
+        #[test]
+        fn a_picked_colour_applies_to_arrows_and_boxes_and_a_new_capture_starts_in_red() {
+            let mut rig = Rig::new();
+            rig.feed(0, key(SHIFT, 1));
+            rig.feed(1, key(KEY_4, 1));
+            rig.feed(2, key(CTRL, 1));
+            rig.move_to(20, (800.0, 400.0));
+            assert_eq!(rig.live().unwrap().color, InkColor::Blue);
+            // The same shared state under a new tracker (the next capture): red again.
+            let again = InkTracker::new(frame(), rig.state.clone());
+            assert_eq!(*rig.state.color.lock().unwrap(), InkColor::Red);
+            assert!(!again.drawing());
+        }
+
+        #[test]
+        fn digits_pick_nothing_without_shift_or_with_super() {
+            let mut rig = Rig::new();
+            rig.feed(0, key(KEY_2, 1));
+            assert_eq!(*rig.state.color.lock().unwrap(), InkColor::Red);
+            rig.feed(1, key(SHIFT, 1));
+            rig.feed(2, key(SUPER, 1));
+            rig.feed(3, key(KEY_3, 1));
+            assert_eq!(*rig.state.color.lock().unwrap(), InkColor::Red);
+            // A held key repeating or being let go is no press.
+            rig.feed(4, key(SUPER, 0));
+            rig.feed(5, key(KEY_3, 2));
+            rig.feed(6, key(KEY_3, 0));
+            assert_eq!(*rig.state.color.lock().unwrap(), InkColor::Red);
+        }
+
+        #[test]
+        fn ctrl_z_takes_back_the_last_stroke_or_pin_and_only_that() {
+            let mut rig = Rig::new();
+            rig.feed(0, key(SHIFT, 1));
+            let t = draw_line(&mut rig, 8, 8);
+            rig.feed(t, key(SHIFT, 0));
+            // A pin after the stroke, then a stroke the capsule's laser is not part of.
+            rig.feed(t + 10, key(SHIFT, 1));
+            rig.at.set(Some((300.0, 200.0)));
+            rig.feed(t + 100, key(BTN_LEFT, 1));
+            rig.feed(t + 150, key(BTN_LEFT, 0));
+            rig.feed(t + 200, key(SHIFT, 0));
+            let mut laser = rig.strokes()[0].clone();
+            laser.laser = true;
+            rig.state.strokes.lock().unwrap().push(laser);
+            assert_eq!(rig.strokes().len(), 3);
+            // Undo skips the laser and takes the pin...
+            rig.feed(t + 300, key(CTRL, 1));
+            rig.feed(t + 301, key(Z, 1));
+            assert_eq!(
+                rig.strokes()
+                    .iter()
+                    .map(|s| (s.pin, s.laser))
+                    .collect::<Vec<_>>(),
+                vec![(None, false), (None, true)]
+            );
+            // ...and each press takes one (a held Z repeating, or its release, does not).
+            rig.feed(t + 320, key(Z, 2));
+            rig.feed(t + 330, key(Z, 0));
+            assert_eq!(rig.strokes().len(), 2);
+            rig.feed(t + 400, key(Z, 1));
+            assert_eq!(rig.strokes().len(), 1);
+            assert!(rig.strokes()[0].laser);
+            // Nothing left to undo is not an error.
+            rig.feed(t + 500, key(Z, 1));
+            assert_eq!(rig.strokes().len(), 1);
+        }
+
+        #[test]
+        fn undo_needs_ctrl_alone_and_the_pin_after_an_undone_one_reuses_its_number() {
+            let mut rig = Rig::new();
+            let pin = |rig: &mut Rig, t: u64| {
+                rig.feed(t, key(SHIFT, 1));
+                rig.feed(t + 10, key(BTN_LEFT, 1));
+                rig.feed(t + 50, key(BTN_LEFT, 0));
+                rig.feed(t + 60, key(SHIFT, 0));
+            };
+            pin(&mut rig, 0);
+            pin(&mut rig, 1_000);
+            // Plain Z, ⇧+Ctrl+Z (redo in most apps), Alt+Ctrl+Z and Super+Z are not undo.
+            rig.feed(2_000, key(Z, 1));
+            for held in [vec![CTRL, SHIFT], vec![CTRL, ALT], vec![SUPER]] {
+                for &m in &held {
+                    rig.feed(2_010, key(m, 1));
+                }
+                rig.feed(2_020, key(Z, 1));
+                for &m in &held {
+                    rig.feed(2_030, key(m, 0));
+                }
+            }
+            assert_eq!(rig.strokes().len(), 2);
+            rig.feed(3_000, key(CTRL, 1));
+            rig.feed(3_010, key(Z, 1));
+            rig.feed(3_020, key(CTRL, 0));
+            assert_eq!(rig.strokes().len(), 1);
+            pin(&mut rig, 4_000);
+            let pins: Vec<_> = rig.strokes().iter().map(|s| s.pin).collect();
+            assert_eq!(pins, vec![Some(1), Some(2)]);
+        }
+
+        #[test]
+        fn undo_and_a_colour_ring_the_overlay() {
+            let mut rig = Rig::new();
+            let fd = rig.state.wake.attach().unwrap();
+            let rung = || {
+                let mut count = 0_u64;
+                let read = unsafe { libc::read(fd.as_raw_fd(), (&raw mut count).cast(), 8) };
+                read == 8
+            };
+            rig.state.strokes.lock().unwrap().push(Stroke {
+                t0: 0,
+                t1: 0,
+                fw: 1,
+                fh: 1,
+                on: None,
+                pin: None,
+                laser: false,
+                color: InkColor::Red,
+                shape: None,
+                pts: vec![0, 0, 0],
+            });
+            rig.feed(0, key(CTRL, 1));
+            rig.feed(1, key(Z, 1));
+            assert!(rung());
+            rig.feed(3, key(SHIFT, 1));
+            while rung() {}
+            rig.feed(4, key(KEY_2, 1));
+            assert!(rung());
         }
 
         #[test]

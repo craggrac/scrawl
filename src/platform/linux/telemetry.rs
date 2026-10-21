@@ -12,7 +12,7 @@ use super::shortcut::{PressGate, PressSource};
 use crate::capture::LiveOverlayEvent;
 use crate::ink::{InkState, Wake};
 use crate::linux::input::InputRecorder;
-use crate::model::{CaptureMode, InteractionEvent, Stroke, TargetFrame};
+use crate::model::{CaptureMode, InkColor, InteractionEvent, Stroke, TargetFrame};
 
 /// Ends a running input recorder and returns its events.
 type Stopper = Box<dyn FnOnce() -> Vec<InteractionEvent> + Send>;
@@ -36,6 +36,8 @@ pub struct SharedCaptureTelemetry {
     pub shift_held: Arc<AtomicBool>,
     /// The pointer in global points as of the last look while ⇧ was held.
     pub pointer_screen: Arc<Mutex<[f32; 2]>>,
+    /// The colour ink is drawn in now (red at each capture's start).
+    pub ink_color: Arc<Mutex<InkColor>>,
     /// Rings the ink overlay's loop when the ink changes; nothing until an overlay attaches.
     pub ink_wake: Arc<Wake>,
     /// Scrawl's own windows, left out of a macOS capture; `wf-recorder` records the output.
@@ -77,6 +79,7 @@ impl SharedCaptureTelemetry {
             live_ink: Arc::new(Mutex::new(None)),
             shift_held: Arc::new(AtomicBool::new(false)),
             pointer_screen: Arc::new(Mutex::new([0.0, 0.0])),
+            ink_color: Arc::new(Mutex::new(InkColor::Red)),
             ink_wake: Arc::new(Wake::default()),
             excluded_window_ids: Arc::new(Mutex::new(Vec::new())),
             passthrough_window_ids: Mutex::new(Vec::new()),
@@ -100,6 +103,7 @@ impl SharedCaptureTelemetry {
             live: Arc::clone(&self.live_ink),
             shift_held: Arc::clone(&self.shift_held),
             pointer: Arc::clone(&self.pointer_screen),
+            color: Arc::clone(&self.ink_color),
             wake: Arc::clone(&self.ink_wake),
         }
     }
@@ -383,5 +387,7 @@ mod tests {
         assert_eq!(telemetry.strokes.lock().unwrap().len(), 1);
         state.shift_held.store(true, Ordering::Release);
         assert!(telemetry.shift_held.load(Ordering::Acquire));
+        *state.color.lock().unwrap() = InkColor::Blue;
+        assert_eq!(*telemetry.ink_color.lock().unwrap(), InkColor::Blue);
     }
 }
