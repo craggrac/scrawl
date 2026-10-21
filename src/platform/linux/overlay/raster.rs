@@ -50,6 +50,11 @@ impl Rect {
     }
 }
 
+/// The smallest box holding all of `rects`.
+pub fn bounding(rects: &[Rect]) -> Option<Rect> {
+    rects.iter().copied().reduce(Rect::union)
+}
+
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -62,27 +67,43 @@ struct Coverage {
     halo: f32,
 }
 
+/// Side of a damage tile, in device pixels. A frame repaints and damages only the tiles that
+/// the scene touches now or touched last time, so strokes in opposite corners cost two
+/// patches, not the box around both.
+const TILE: i32 = 64;
+
 /// The canvas, in device pixels, at an integer buffer `scale` of the scene's points.
 pub struct Raster {
     width: i32,
     height: i32,
     scale: f32,
+    tiles_x: i32,
     bgra: Vec<u8>,
-    /// What the last `draw` painted: the next one clears it.
-    painted: Option<Rect>,
-    /// Scratch coverage for the box being drawn.
+    /// The tiles the last `draw` painted: the next one clears them.
+    painted: Vec<usize>,
+    /// For the scene being drawn, the shapes that reach each tile (segments, then pins, then
+    /// the tip, numbered in that order). Empty again between draws.
+    bins: Vec<Vec<u32>>,
+    /// Scratch: tiles already in the dirty list.
+    marked: Vec<bool>,
+    /// Scratch coverage for the tile being drawn.
     cover: Vec<Coverage>,
 }
 
 impl Raster {
     pub fn new(width: u32, height: u32, scale: u32) -> Self {
         let (width, height) = (width as i32, height as i32);
+        let tiles_x = (width + TILE - 1) / TILE;
+        let tiles = (tiles_x * ((height + TILE - 1) / TILE)) as usize;
         Self {
             width,
             height,
             scale: scale.max(1) as f32,
+            tiles_x,
             bgra: vec![0; width as usize * height as usize * 4],
-            painted: None,
+            painted: Vec::new(),
+            bins: vec![Vec::new(); tiles],
+            marked: vec![false; tiles],
             cover: Vec::new(),
         }
     }
@@ -112,53 +133,96 @@ impl Raster {
         ]
     }
 
-    /// Draws `scene`. Returns the box of pixels that may differ from before (what was
-    /// painted last time and what is now), or `None` if nothing was or is painted.
-    pub fn draw(&mut self, scene: &Scene) -> Option<Rect> {
-        let now = self.bounds(scene);
-        let damage = match (self.painted, now) {
-            (Some(before), Some(now)) => before.union(now),
-            (Some(only), None) | (None, Some(only)) => only,
-            (None, None) => return None,
-        };
-        // What was painted is cleared, then the scene goes on top.
-        self.fill_clear(damage);
-        if let Some(now) = now {
-            self.paint(scene, now);
+    fn tile_rect(&self, tile: usize) -> Rect {
+        let (tx, ty) = (tile as i32 % self.tiles_x, tile as i32 / self.tiles_x);
+        Rect {
+            x0: tx * TILE,
+            y0: ty * TILE,
+            x1: ((tx + 1) * TILE).min(self.width),
+            y1: ((ty + 1) * TILE).min(self.height),
         }
-        self.painted = now;
-        Some(damage)
     }
 
-    /// The pixels the scene can reach, clipped to the canvas.
-    fn bounds(&self, scene: &Scene) -> Option<Rect> {
-        let mut bounds: Option<Rect> = None;
-        let mut grow = |lo: [f32; 2], hi: [f32; 2], reach: f32| {
-            let scale = self.scale;
-            let rect = Rect {
-                x0: (((lo[0] - reach) * scale).floor() as i32).max(0),
-                y0: (((lo[1] - reach) * scale).floor() as i32).max(0),
-                x1: (((hi[0] + reach) * scale).ceil() as i32 + 1).min(self.width),
-                y1: (((hi[1] + reach) * scale).ceil() as i32 + 1).min(self.height),
+    /// Draws `scene`. Returns the boxes of pixels that may differ from before: the tiles it
+    /// touches now and those it touched last time, a row's neighbours joined. Empty if nothing
+    /// was or is painted.
+    pub fn draw(&mut self, scene: &Scene) -> Vec<Rect> {
+        let before = std::mem::take(&mut self.painted);
+        for &tile in &before {
+            self.bins[tile].clear();
+        }
+        let mut touched: Vec<usize> = Vec::new();
+        let shapes = scene.segments.len() + scene.pins.len() + usize::from(scene.tip.is_some());
+        for shape in 0..shapes {
+            let Some(reach) = self.shape_box(scene, shape) else {
+                continue;
             };
-            if rect.x0 < rect.x1 && rect.y0 < rect.y1 {
-                bounds = Some(bounds.map_or(rect, |b| b.union(rect)));
+            for ty in reach.y0 / TILE..=(reach.y1 - 1) / TILE {
+                for tx in reach.x0 / TILE..=(reach.x1 - 1) / TILE {
+                    let tile = (ty * self.tiles_x + tx) as usize;
+                    if self.bins[tile].is_empty() {
+                        touched.push(tile);
+                    }
+                    self.bins[tile].push(shape as u32);
+                }
             }
-        };
-        for s in &scene.segments {
-            grow(
+        }
+        let mut dirty = touched.clone();
+        for &tile in &dirty {
+            self.marked[tile] = true;
+        }
+        for tile in before {
+            if !self.marked[tile] {
+                dirty.push(tile);
+            }
+        }
+        dirty.sort_unstable();
+        // What was painted is cleared, then the scene goes on top.
+        let mut damage: Vec<Rect> = Vec::new();
+        for &tile in &dirty {
+            self.marked[tile] = false;
+            let area = self.tile_rect(tile);
+            self.fill_clear(area);
+            let shapes = std::mem::take(&mut self.bins[tile]);
+            if !shapes.is_empty() {
+                self.paint(scene, area, &shapes);
+            }
+            self.bins[tile] = shapes;
+            match damage.last_mut() {
+                Some(last) if last.y0 == area.y0 && last.x1 == area.x0 => last.x1 = area.x1,
+                _ => damage.push(area),
+            }
+        }
+        self.painted = touched;
+        damage
+    }
+
+    /// The pixels shape `index` (a segment, then a pin, then the tip) can reach, clipped to the
+    /// canvas.
+    fn shape_box(&self, scene: &Scene, index: usize) -> Option<Rect> {
+        let segments = scene.segments.len();
+        let (lo, hi, reach) = if index < segments {
+            let s = &scene.segments[index];
+            (
                 [s.a[0].min(s.b[0]), s.a[1].min(s.b[1])],
                 [s.a[0].max(s.b[0]), s.a[1].max(s.b[1])],
                 INK_REACH_PT,
-            );
-        }
-        for p in &scene.pins {
-            grow(p.pos, p.pos, p.radius + PIN_REACH_PT);
-        }
-        if let Some(tip) = scene.tip {
-            grow(tip, tip, TIP_REACH_PT);
-        }
-        bounds
+            )
+        } else if index < segments + scene.pins.len() {
+            let p = &scene.pins[index - segments];
+            (p.pos, p.pos, p.radius + PIN_REACH_PT)
+        } else {
+            let tip = scene.tip?;
+            (tip, tip, TIP_REACH_PT)
+        };
+        let scale = self.scale;
+        let rect = Rect {
+            x0: (((lo[0] - reach) * scale).floor() as i32).max(0),
+            y0: (((lo[1] - reach) * scale).floor() as i32).max(0),
+            x1: (((hi[0] + reach) * scale).ceil() as i32 + 1).min(self.width),
+            y1: (((hi[1] + reach) * scale).ceil() as i32 + 1).min(self.height),
+        };
+        (rect.x0 < rect.x1 && rect.y0 < rect.y1).then_some(rect)
     }
 
     fn fill_clear(&mut self, rect: Rect) {
@@ -169,18 +233,20 @@ impl Raster {
         }
     }
 
-    fn paint(&mut self, scene: &Scene, area: Rect) {
+    fn paint(&mut self, scene: &Scene, area: Rect, shapes: &[u32]) {
         let (w, h) = (area.width() as usize, area.height() as usize);
         self.cover.clear();
         self.cover.resize(w * h, Coverage::default());
-        for segment in &scene.segments {
-            self.ink(segment, area);
-        }
-        for pin in &scene.pins {
-            self.pin(pin, area);
-        }
-        if let Some(tip) = scene.tip {
-            self.tip(tip, area);
+        let segments = scene.segments.len();
+        for &shape in shapes {
+            let shape = shape as usize;
+            if shape < segments {
+                self.ink(&scene.segments[shape], area);
+            } else if shape < segments + scene.pins.len() {
+                self.pin(&scene.pins[shape - segments], area);
+            } else if let Some(tip) = scene.tip {
+                self.tip(tip, area);
+            }
         }
         for y in 0..h {
             for x in 0..w {
@@ -315,6 +381,12 @@ mod tests {
         }
     }
 
+    /// The only box of a damage list.
+    fn one(damage: Vec<Rect>) -> Rect {
+        assert_eq!(damage.len(), 1, "{damage:?}");
+        damage[0]
+    }
+
     /// A horizontal line along the centre of pixel row 100.
     fn line(w: f32, alpha: f32) -> Scene {
         scene(vec![seg([100.0, 100.5], [200.0, 100.5], w, alpha)])
@@ -447,44 +519,85 @@ mod tests {
     #[test]
     fn the_damage_is_what_changed_and_an_empty_scene_clears_only_what_was_painted() {
         let mut raster = Raster::new(400, 300, 1);
-        assert_eq!(raster.draw(&Scene::default()), None);
-        let first = raster.draw(&line(1.0, 1.0)).unwrap();
-        // The box of the segment and its reach (4.5875 -> to the pixel).
+        assert!(raster.draw(&Scene::default()).is_empty());
+        let first = one(raster.draw(&line(1.0, 1.0)));
+        // The tiles of the segment and its reach (4.5875 pt): 64 px tiles, one row of them.
         assert!(first.x0 <= 95 && first.x1 >= 205 && first.y0 <= 96 && first.y1 >= 105);
-        assert!(first.x0 >= 90 && first.x1 <= 210 && first.y0 >= 90 && first.y1 <= 110);
+        assert_eq!((first.x0, first.x1, first.y0, first.y1), (64, 256, 64, 128));
 
         // Another stroke elsewhere: the damage is both, since the first is wiped and redrawn.
-        let second = raster
-            .draw(&scene(vec![seg([300.0, 200.5], [350.0, 200.5], 1.0, 1.0)]))
+        let second = bounding(&raster.draw(&scene(vec![seg([300.0, 200.5], [350.0, 200.5], 1.0, 1.0)])))
             .unwrap();
         assert!(second.x0 <= first.x0 && second.x1 >= 350 && second.y1 >= 205);
         assert_eq!(raster.pixel(150, 100), [0; 4], "the first is gone");
         assert_eq!(raster.pixel(320, 200), RED_FULL);
 
         // An empty scene wipes the last and then nothing is left to do.
-        let wiped = raster.draw(&Scene::default()).unwrap();
+        let wiped = one(raster.draw(&Scene::default()));
         assert!(wiped.x0 <= 300 && wiped.x1 >= 350);
         assert!(raster.pixels().iter().all(|&b| b == 0));
-        assert_eq!(raster.draw(&Scene::default()), None);
+        assert!(raster.draw(&Scene::default()).is_empty());
     }
 
     #[test]
     fn the_damage_covers_every_segment_box_and_stays_on_the_canvas() {
         let mut raster = Raster::new(400, 300, 1);
-        let damage = raster
-            .draw(&scene(vec![
-                seg([10.0, 10.5], [60.0, 10.5], 1.0, 1.0),
-                seg([300.0, 250.5], [395.0, 250.5], 1.0, 1.0),
-                // Wholly off the canvas.
-                seg([-500.0, -50.5], [-400.0, -50.5], 1.0, 1.0),
-            ]))
-            .unwrap();
-        assert_eq!((damage.x0, damage.y0), (5, 5));
+        let damage = bounding(&raster.draw(&scene(vec![
+            seg([10.0, 10.5], [60.0, 10.5], 1.0, 1.0),
+            seg([300.0, 250.5], [395.0, 250.5], 1.0, 1.0),
+            // Wholly off the canvas.
+            seg([-500.0, -50.5], [-400.0, -50.5], 1.0, 1.0),
+        ])))
+        .unwrap();
+        // The corner tile, and the far tiles clipped to the canvas.
+        assert_eq!((damage.x0, damage.y0), (0, 0));
         assert_eq!(damage.x1, 400);
         assert!(damage.y1 >= 255 && damage.y1 <= 300);
         // A segment crossing the edge is clipped, not a panic.
         raster.draw(&scene(vec![seg([-20.0, 100.5], [20.0, 100.5], 1.0, 1.0)]));
         assert_eq!(raster.pixel(0, 100), RED_FULL);
+    }
+
+    fn area(damage: &[Rect]) -> i64 {
+        damage
+            .iter()
+            .map(|r| i64::from(r.width()) * i64::from(r.height()))
+            .sum()
+    }
+
+    /// 200 segments of a wavy line from `from` rightwards.
+    fn wave(from: [f32; 2], step: f32) -> Vec<Segment> {
+        (0..200)
+            .map(|i| {
+                let (x, y) = (from[0] + i as f32 * step, from[1] + (i % 2) as f32 * 6.0);
+                seg([x, y], [x + step, from[1] + ((i + 1) % 2) as f32 * 6.0], 1.0, 1.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_strokes_in_opposite_corners_damage_two_places_not_the_whole_screen() {
+        let mut raster = Raster::new(1_920, 1_080, 1);
+        let mut segments = wave([20.0, 20.0], 1.5);
+        segments.extend(wave([1_600.0, 1_040.0], 1.5));
+        let damage = raster.draw(&scene(segments));
+        let screen = 1_920_i64 * 1_080;
+        // Two small patches: well under a tenth of the screen.
+        assert!(area(&damage) * 10 < screen, "{} of {screen}", area(&damage));
+        // Both corners are covered.
+        let covers = |x: i32, y: i32| {
+            damage
+                .iter()
+                .any(|r| (r.x0..r.x1).contains(&x) && (r.y0..r.y1).contains(&y))
+        };
+        assert!(covers(100, 22) && covers(1_700, 1_044));
+        assert!(!covers(960, 540));
+        // Drawing it again after a change in one corner damages that corner and the old
+        // places only, and what is painted is right.
+        let again = raster.draw(&scene(wave([20.0, 20.0], 1.5)));
+        assert!(area(&again) * 10 < screen);
+        assert_eq!(raster.pixel(1_700, 1_043)[3], 0, "the far stroke is wiped");
+        assert_ne!(raster.pixel(60, 21)[3], 0);
     }
 
     #[test]
@@ -517,5 +630,26 @@ mod tests {
             worst = worst.max(started.elapsed());
         }
         assert!(worst < std::time::Duration::from_millis(20), "{worst:?}");
+    }
+
+    #[test]
+    fn strokes_in_opposite_corners_cost_no_more_than_their_own_size_each_frame() {
+        let mut segments = wave([20.0, 20.0], 1.5);
+        segments.extend(wave([1_600.0, 1_040.0], 1.5));
+        let scene = scene(segments);
+        let mut raster = Raster::new(1_920, 1_080, 1);
+        let mut times = Vec::new();
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            // Fading ink repaints its places every frame: change the opacity each time.
+            let mut frame = scene.clone();
+            let alpha = 0.5 + times.len() as f32 * 0.02;
+            frame.segments.iter_mut().for_each(|s| s.alpha = alpha);
+            raster.draw(&frame);
+            times.push(started.elapsed());
+        }
+        times.sort();
+        eprintln!("opposite corners, 400 segments: median {:?}, worst {:?}", times[10], times[19]);
+        assert!(times[19] < std::time::Duration::from_millis(20), "{:?}", times[19]);
     }
 }

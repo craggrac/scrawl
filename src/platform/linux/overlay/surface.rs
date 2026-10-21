@@ -20,14 +20,14 @@ use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
     LayerSurfaceConfigure,
 };
-use smithay_client_toolkit::shm::slot::SlotPool;
+use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
     registry_handlers,
 };
 
-use super::raster::Raster;
+use super::raster::{Raster, Rect as Damage, bounding};
 use super::scene::{self, Scene};
 use super::{Output, Shared, buffer_scale, pick_output};
 use crate::capture::scrawl_log;
@@ -78,6 +78,20 @@ struct Current {
     buffer_scale: i32,
 }
 
+/// Two `wl_shm` buffers that live as long as the surface's size. The compositor holds one
+/// while the other is drawn into; each remembers what changed since it was last filled, so a
+/// frame copies only that, and damages only that.
+struct Buffers {
+    buffers: [Buffer; 2],
+    /// Per buffer: what the canvas has that the buffer doesn't yet.
+    behind: [Vec<Damage>; 2],
+    /// The one to try first.
+    next: usize,
+}
+
+/// Rects remembered per buffer before they are joined into their bounding box.
+const MAX_BEHIND: usize = 256;
+
 struct App {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -90,6 +104,10 @@ struct App {
     configured: bool,
     closed: bool,
     raster: Option<Raster>,
+    buffers: Option<Buffers>,
+    /// The canvas has changes no buffer carries yet (all buffers were held, or a frame callback
+    /// was pending).
+    unsent: bool,
     last_scene: Option<Scene>,
     animating: bool,
     frame_pending: Option<Instant>,
@@ -127,6 +145,8 @@ fn serve(launch: &Launch, ready: &mut Option<SyncSender<Result<Rect, String>>>) 
         configured: false,
         closed: false,
         raster: None,
+        buffers: None,
+        unsent: false,
         last_scene: None,
         animating: false,
         frame_pending: None,
@@ -228,6 +248,9 @@ fn pump(
         } else {
             drop(guard);
         }
+        if fds[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(lost(&"the compositor hung up"));
+        }
         if fds[1].revents & libc::POLLIN != 0 {
             let mut count = 0_u64;
             unsafe { libc::read(wake.as_raw_fd(), (&raw mut count).cast(), 8) };
@@ -303,7 +326,7 @@ impl App {
         info: Output,
         qh: &QueueHandle<Self>,
     ) -> Result<(), String> {
-        let scale = self.scale_for(info);
+        let mut scale = self.scale_for(info);
         let surface = self.compositor.create_surface(qh);
         let layer = self.layer_shell.create_layer_surface(
             qh,
@@ -320,7 +343,12 @@ impl App {
         let region = Region::new(&self.compositor)
             .map_err(|error| format!("could not make an input region: {error}"))?;
         layer.set_input_region(Some(region.wl_region()));
-        let _ = layer.set_buffer_scale(scale as u32);
+        if layer.set_buffer_scale(scale as u32).is_err() && scale != 1 {
+            scrawl_log(format!(
+                "Ink overlay: the compositor can't set a buffer scale ({scale}): drawing at 1"
+            ));
+            scale = 1;
+        }
         layer.commit();
         self.layer = Some(layer);
         self.current = Some(Current {
@@ -330,6 +358,8 @@ impl App {
         });
         self.configured = false;
         self.raster = None;
+        self.buffers = None;
+        self.unsent = false;
         self.last_scene = None;
         self.frame_pending = None;
         Ok(())
@@ -410,7 +440,7 @@ impl App {
         }
         let (scene, animating) = self.scene(origin);
         self.animating = animating;
-        if self.last_scene.as_ref() == Some(&scene) {
+        if self.last_scene.as_ref() == Some(&scene) && !self.unsent {
             return Ok(());
         }
         // One frame at a time: the next waits for the compositor's callback.
@@ -420,27 +450,57 @@ impl App {
         {
             return Ok(());
         }
-        let (Some(raster), Some(layer)) = (self.raster.as_mut(), self.layer.as_ref()) else {
+        let (Some(raster), Some(bufs), Some(layer)) = (
+            self.raster.as_mut(),
+            self.buffers.as_mut(),
+            self.layer.as_ref(),
+        ) else {
             return Ok(());
         };
-        let damage = raster.draw(&scene);
-        self.last_scene = Some(scene);
-        let Some(damage) = damage else {
+        if self.last_scene.as_ref() != Some(&scene) {
+            let damage = raster.draw(&scene);
+            self.last_scene = Some(scene);
+            if !damage.is_empty() {
+                for behind in &mut bufs.behind {
+                    behind.extend_from_slice(&damage);
+                    if behind.len() > MAX_BEHIND {
+                        *behind = bounding(behind).into_iter().collect();
+                    }
+                }
+                self.unsent = true;
+            }
+        }
+        if !self.unsent {
+            return Ok(());
+        }
+        // The buffer the compositor isn't holding; if it holds both, its release event wakes
+        // the loop to try again.
+        let free = [bufs.next, 1 - bufs.next]
+            .into_iter()
+            .find(|&i| bufs.buffers[i].canvas(&mut self.pool).is_some());
+        let Some(i) = free else {
             return Ok(());
         };
-        let (width, height) = (raster.width(), raster.height());
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(width, height, width * 4, wl_shm::Format::Argb8888)
-            .map_err(|error| format!("could not make a buffer: {error}"))?;
-        canvas.copy_from_slice(raster.pixels());
+        let Some(canvas) = bufs.buffers[i].canvas(&mut self.pool) else {
+            return Ok(());
+        };
+        let stride = raster.width() as usize * 4;
+        let pixels = raster.pixels();
         let surface = layer.wl_surface();
-        surface.damage_buffer(damage.x0, damage.y0, damage.width(), damage.height());
+        for rect in bufs.behind[i].drain(..) {
+            for y in rect.y0 as usize..rect.y1 as usize {
+                let (from, to) = (y * stride + rect.x0 as usize * 4, y * stride + rect.x1 as usize * 4);
+                canvas[from..to].copy_from_slice(&pixels[from..to]);
+            }
+            surface.damage_buffer(rect.x0, rect.y0, rect.width(), rect.height());
+        }
         surface.frame(qh, surface.clone());
-        buffer
+        bufs.buffers[i]
             .attach_to(surface)
             .map_err(|error| format!("could not attach a buffer: {error}"))?;
         layer.commit();
+        bufs.next = 1 - i;
+        self.unsent = false;
         self.frame_pending = Some(Instant::now());
         Ok(())
     }
@@ -542,6 +602,37 @@ impl LayerShellHandler for App {
         if !same {
             self.raster = Some(Raster::new(pixels_w, pixels_h, scale));
             self.last_scene = None;
+            self.unsent = false;
+            self.buffers = None;
+            let whole = Damage {
+                x0: 0,
+                y0: 0,
+                x1: pixels_w as i32,
+                y1: pixels_h as i32,
+            };
+            let mut make = || {
+                self.pool
+                    .create_buffer(
+                        pixels_w as i32,
+                        pixels_h as i32,
+                        pixels_w as i32 * 4,
+                        wl_shm::Format::Argb8888,
+                    )
+                    .map(|(buffer, _)| buffer)
+            };
+            match (make(), make()) {
+                (Ok(a), Ok(b)) => {
+                    self.buffers = Some(Buffers {
+                        buffers: [a, b],
+                        behind: [vec![whole], vec![whole]],
+                        next: 0,
+                    });
+                }
+                (Err(error), _) | (_, Err(error)) => {
+                    scrawl_log(format!("Ink overlay: could not make its buffers: {error}"));
+                    self.closed = true;
+                }
+            }
         }
         self.configured = true;
     }
