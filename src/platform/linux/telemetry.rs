@@ -21,6 +21,9 @@ pub(super) struct Handover {
     pub strokes: Vec<Stroke>,
 }
 
+/// Ends a running input recorder and returns its events.
+type Stopper = Box<dyn FnOnce() -> Vec<InteractionEvent> + Send>;
+
 /// Where a capture's input goes once `finish_session` has it.
 pub(super) type EventSlot = Arc<Mutex<Option<Handover>>>;
 
@@ -60,7 +63,7 @@ pub struct SharedCaptureTelemetry {
     hold_mods: AtomicU64,
     /// Lets a key press seen by both the listener and the bind act once.
     press_gate: Mutex<(Instant, PressGate)>,
-    input: Mutex<Option<InputRecorder>>,
+    input: Mutex<Option<Stopper>>,
     session_events: Mutex<Option<EventSlot>>,
 }
 
@@ -188,6 +191,30 @@ impl SharedCaptureTelemetry {
 
     /// A capture of `frame` starts now: the clock restarts and the input recorder starts.
     pub fn reset_for_session(&self, frame: TargetFrame) {
+        self.begin_session(frame, |started_at| {
+            let recorder = InputRecorder::start(
+                frame,
+                started_at,
+                Arc::clone(&self.window_log_request),
+                Some(self.ink_state()),
+            );
+            Box::new(move || recorder.stop())
+        });
+    }
+
+    /// `reset_for_session` with the recorder's start given (`start` gets the capture clock's
+    /// zero and returns how to stop what it started).
+    fn begin_session(&self, frame: TargetFrame, start: impl FnOnce(Instant) -> Stopper) {
+        // A recorder left from a capture that never finished stops first: its thread is still
+        // writing the shared ink, which the new capture must start without.
+        let old = self
+            .input
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(stop) = old {
+            let _ = stop();
+        }
         let started_at = Instant::now();
         *self
             .started_at
@@ -212,21 +239,7 @@ impl SharedCaptureTelemetry {
         self.shift_held.store(false, Ordering::Release);
         self.selecting.store(false, Ordering::Release);
         self.active.store(true, Ordering::Release);
-        let recorder = InputRecorder::start(
-            frame,
-            started_at,
-            Arc::clone(&self.window_log_request),
-            Some(self.ink_state()),
-        );
-        // A recorder left from a capture that never finished stops here.
-        if let Some(old) = self
-            .input
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace(recorder)
-        {
-            let _ = old.stop();
-        }
+        *self.input.lock().unwrap_or_else(PoisonError::into_inner) = Some(start(started_at));
     }
 
     /// The screen session that will want this capture's events.
@@ -252,7 +265,7 @@ impl SharedCaptureTelemetry {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         // The recorder's thread ends first: it keeps the stroke being drawn.
-        let events = recorder.map(InputRecorder::stop).unwrap_or_default();
+        let events = recorder.map(|stop| stop()).unwrap_or_default();
         *self
             .live_ink
             .lock()
@@ -327,6 +340,11 @@ mod tests {
         assert_eq!(handed.strokes, strokes);
     }
 
+    /// A recorder that has stopped and left nothing.
+    fn idle_recorder() -> Stopper {
+        Box::new(Vec::new)
+    }
+
     #[test]
     fn a_new_session_starts_without_the_last_ones_ink() {
         let (sender, _receiver) = flume::unbounded();
@@ -334,12 +352,31 @@ mod tests {
         telemetry.strokes.lock().unwrap().push(stroke(10, None));
         *telemetry.live_ink.lock().unwrap() = Some(stroke(30, None));
         telemetry.shift_held.store(true, Ordering::Release);
-        telemetry.reset_for_session(frame());
+        telemetry.begin_session(frame(), |_| idle_recorder());
         assert!(telemetry.strokes.lock().unwrap().is_empty());
         assert!(telemetry.live_ink.lock().unwrap().is_none());
         assert!(!telemetry.shift_held.load(Ordering::Acquire));
+        assert!(telemetry.active.load(Ordering::Acquire));
         let (_, strokes) = telemetry.finish_session();
         assert!(strokes.is_empty());
+    }
+
+    #[test]
+    fn a_recorder_left_running_is_stopped_before_the_ink_is_cleared() {
+        let (sender, _receiver) = flume::unbounded();
+        let telemetry = SharedCaptureTelemetry::new(sender);
+        // The old recorder's thread writes the stroke it was drawing as it stops.
+        let (strokes, live) = (Arc::clone(&telemetry.strokes), Arc::clone(&telemetry.live_ink));
+        telemetry.begin_session(frame(), move |_| {
+            Box::new(move || {
+                strokes.lock().unwrap().push(stroke(10, None));
+                *live.lock().unwrap() = Some(stroke(20, None));
+                Vec::new()
+            })
+        });
+        telemetry.begin_session(frame(), |_| idle_recorder());
+        assert!(telemetry.strokes.lock().unwrap().is_empty());
+        assert!(telemetry.live_ink.lock().unwrap().is_none());
     }
 
     #[test]
