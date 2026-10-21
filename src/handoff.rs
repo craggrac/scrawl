@@ -335,6 +335,13 @@ pub struct Config {
     /// Feature flag: shows **Export Last Capture as Video…** in the menu (default off).
     #[serde(default)]
     pub video_export: Option<bool>,
+    /// Linux: keeps a rolling buffer of the screen and microphone so `scrawl replay` can save the
+    /// last seconds (default off).
+    #[serde(default)]
+    pub replay_buffer: Option<bool>,
+    /// How many seconds the replay buffer holds (default 30, at most 60).
+    #[serde(default)]
+    pub replay_seconds: Option<u64>,
     /// `"apple"` (default) or `"hex"`: which engine transcribes recordings (`transcribe`).
     #[serde(default)]
     pub transcriber: Option<String>,

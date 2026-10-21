@@ -194,6 +194,33 @@ impl AudioRecorder {
     }
 }
 
+/// The replay buffer reads a recorder that keeps running, and caps what it keeps.
+#[cfg(target_os = "linux")]
+impl AudioRecorder {
+    /// The last `count` samples heard so far (fewer if fewer were), recording goes on.
+    pub fn tail(&self, count: usize) -> Vec<f32> {
+        let samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        samples[samples.len().saturating_sub(count)..].to_vec()
+    }
+
+    /// Drops all but the last `keep` samples (once at least `slack` more than that have piled
+    /// up, so the shift happens rarely).
+    pub fn keep_last(&self, keep: usize, slack: usize) {
+        let mut samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() > keep + slack {
+            let extra = samples.len() - keep;
+            samples.drain(..extra);
+        }
+    }
+
+    /// Whether the device failed (never opened, unplugged, overloaded): what it heard before is
+    /// still there. A worker is waiting for the stop, so one that has ended means a failure.
+    pub fn failed(&self) -> bool {
+        self.worker.as_ref().is_some_and(|w| w.is_finished())
+            || self.error.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+}
+
 impl Drop for AudioRecorder {
     fn drop(&mut self) {
         let _ = self.join_worker();
@@ -422,6 +449,43 @@ mod tests {
         };
         assert_eq!(recorder(vec![0.1; 160]).stop().unwrap().sample_count, 160);
         assert!(recorder(Vec::new()).stop().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_running_recorder_is_read_and_capped_without_stopping() {
+        let recorder = AudioRecorder {
+            worker: None,
+            stop_sender: None,
+            samples: Arc::new(Mutex::new((0..100).map(|i| i as f32).collect())),
+            error: Arc::new(Mutex::new(None)),
+            live: None,
+        };
+        assert_eq!(recorder.tail(3), vec![97.0, 98.0, 99.0]);
+        assert_eq!(recorder.tail(500).len(), 100);
+        // Under keep + slack nothing moves.
+        recorder.keep_last(40, 100);
+        assert_eq!(recorder.tail(500).len(), 100);
+        recorder.keep_last(40, 10);
+        assert_eq!(recorder.tail(500).len(), 40);
+        assert_eq!(recorder.tail(1), vec![99.0]);
+        assert!(!recorder.failed());
+        *recorder.error.lock().unwrap() = Some("gone".into());
+        assert!(recorder.failed());
+        // A microphone that never opened ended its worker.
+        let unopened = AudioRecorder {
+            worker: Some(std::thread::spawn(|| bail!("no device"))),
+            stop_sender: None,
+            samples: Arc::new(Mutex::new(Vec::new())),
+            error: Arc::new(Mutex::new(None)),
+            live: None,
+        };
+        while !unopened.worker.as_ref().unwrap().is_finished() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(unopened.failed());
+        // What it heard before the failure is still there.
+        assert_eq!(recorder.stop().unwrap().sample_count, 40);
     }
 
     #[test]
