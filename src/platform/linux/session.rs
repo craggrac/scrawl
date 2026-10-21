@@ -1,6 +1,6 @@
 //! A screen capture with the macOS session's shape (`start` / `elapsed_ms` / `stop`), on
 //! `wf-recorder` (`linux::record::ScreenSession`). Its candidate frames are decoded from the
-//! video at the end, plus one after each click: those events come from the telemetry's input
+//! video at the end, plus one after each click and stroke: those come from the telemetry's input
 //! recorder when the capture finishes.
 
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use super::SharedCaptureTelemetry;
-use super::telemetry::EventSlot;
+use super::telemetry::{EventSlot, Handover};
 use crate::capture::{ScreenRecording, scrawl_log};
 use crate::linux::record;
 use crate::model::TargetInfo;
@@ -124,12 +124,15 @@ impl ScreenCaptureSession {
     /// hands over the events). Without a video, one placeholder frame, as on macOS.
     pub fn stop(self) -> ScreenRecording {
         let duration_ms = self.elapsed_ms().max(100);
-        let events = self
+        let Handover { events, strokes } = self
             .events
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
-            .unwrap_or_default();
+            .unwrap_or(Handover {
+                events: Vec::new(),
+                strokes: Vec::new(),
+            });
         let stopped = self
             .recorder
             .and_then(|recorder| {
@@ -139,7 +142,7 @@ impl ScreenCaptureSession {
                     .ok()
                     .flatten()
             })
-            .map(|recorder| recorder.stop(&events));
+            .map(|recorder| recorder.stop(&events, &strokes));
         match stopped {
             Some(Ok(recording)) => recording,
             failed => {

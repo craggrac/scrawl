@@ -15,7 +15,7 @@ use crate::capture::{
     CANDIDATE_BUDGET_BYTES, CANDIDATE_EDGE, FRAME_SAMPLE_INTERVAL, ScreenRecording,
 };
 use crate::helper::FrameTimes;
-use crate::model::{CaptureMode, InteractionEvent, RgbaFrame, TargetFrame, TargetInfo};
+use crate::model::{CaptureMode, InteractionEvent, RgbaFrame, Stroke, TargetFrame, TargetInfo};
 
 /// How long the first frame may take before a silent screen is assumed (wf-recorder only
 /// writes on damage).
@@ -57,11 +57,13 @@ pub fn sample_interval_ms(duration_ms: u64, frame_bytes: usize) -> u64 {
 /// How long after a click or drag end the screen is sampled, so the keyframe shows its result.
 const URGENT_DELAY_MS: u64 = 250;
 
-/// Movie times to decode for the screen's reaction to each click and drag end: the event time
-/// (capture clock) plus `URGENT_DELAY_MS`, moved onto the movie clock by `video_offset_ms`,
-/// clamped to `video_duration_ms`, sorted and deduplicated.
+/// Movie times to decode for the screen's reaction to each click and drag end, and for where
+/// each ink stroke ended and each pin dropped: the time (capture clock) plus `URGENT_DELAY_MS`,
+/// moved onto the movie clock by `video_offset_ms`, clamped to `video_duration_ms`, sorted and
+/// deduplicated.
 pub fn urgent_frame_times(
     events: &[InteractionEvent],
+    strokes: &[Stroke],
     video_offset_ms: u64,
     video_duration_ms: u64,
 ) -> Vec<u64> {
@@ -72,6 +74,8 @@ pub fn urgent_frame_times(
             InteractionEvent::Drag { t1, .. } => Some(*t1),
             _ => None,
         })
+        // Ink and pins: the screen with the mark just made. (Lasers leave nothing in a video.)
+        .chain(strokes.iter().filter(|s| !s.laser).map(|s| s.t1))
         .map(|t| {
             (t + URGENT_DELAY_MS)
                 .saturating_sub(video_offset_ms)
@@ -288,7 +292,7 @@ impl ScreenSession {
     /// Stops wf-recorder and decodes the candidate frames, plus one shortly after each click
     /// and drag in `events`. `duration_ms` is the whole session on the capture clock (the
     /// video may be shorter: wf-recorder writes on damage).
-    pub fn stop(mut self, events: &[InteractionEvent]) -> Result<ScreenRecording> {
+    pub fn stop(mut self, events: &[InteractionEvent], strokes: &[Stroke]) -> Result<ScreenRecording> {
         let status = terminate(&mut self.child)?;
         let duration_ms = self.started_at.elapsed().as_millis() as u64;
         if !status.success() && status.signal() != Some(libc::SIGINT) && status.code() != Some(130)
@@ -310,7 +314,7 @@ impl ScreenSession {
             bail!("No frames could be decoded from {}", self.video.display());
         }
         let urgent = thin_evenly(
-            urgent_frame_times(events, self.video_offset_ms, probe.duration_ms),
+            urgent_frame_times(events, strokes, self.video_offset_ms, probe.duration_ms),
             urgent_frame_cap(width as usize * height as usize * 4),
         );
         let wanted: Vec<u64> = urgent
@@ -412,9 +416,44 @@ mod tests {
         let events = [drag(1_000, 2_000), click(5_000), click(300)];
         // Offset 100: movie time = capture time + 250 - 100.
         assert_eq!(
-            urgent_frame_times(&events, 100, 60_000),
+            urgent_frame_times(&events, &[], 100, 60_000),
             vec![450, 2_150, 5_150]
         );
+    }
+
+    fn stroke(t0: u64, t1: u64, pin: Option<u32>) -> Stroke {
+        Stroke {
+            t0,
+            t1,
+            fw: 1920,
+            fh: 1080,
+            on: None,
+            pin,
+            laser: false,
+            pts: vec![100, 100, 0],
+        }
+    }
+
+    #[test]
+    fn urgent_times_include_where_each_stroke_ended_and_each_pin() {
+        let strokes = [
+            stroke(2_000, 3_500, None),
+            stroke(5_000, 5_040, Some(1)),
+            // Ink that ended where a click's frame already is.
+            stroke(100, 900, None),
+        ];
+        let events = [click(900)];
+        // Offset 100: movie time = capture time + 250 - 100.
+        assert_eq!(
+            urgent_frame_times(&events, &strokes, 100, 60_000),
+            vec![1_050, 3_650, 5_190]
+        );
+        // A laser stroke leaves no ink in the video.
+        let laser = Stroke {
+            laser: true,
+            ..stroke(1, 2, None)
+        };
+        assert!(urgent_frame_times(&[], &[laser], 0, 10_000).is_empty());
     }
 
     #[test]
@@ -428,8 +467,8 @@ mod tests {
             label: None,
         };
         let events = [click(9_900), click(9_950), scroll, click(0)];
-        assert_eq!(urgent_frame_times(&events, 500, 9_680), vec![0, 9_650, 9_680]);
-        assert!(urgent_frame_times(&[], 0, 10_000).is_empty());
+        assert_eq!(urgent_frame_times(&events, &[], 500, 9_680), vec![0, 9_650, 9_680]);
+        assert!(urgent_frame_times(&[], &[], 0, 10_000).is_empty());
     }
 
     #[test]

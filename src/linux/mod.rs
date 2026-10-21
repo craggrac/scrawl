@@ -149,7 +149,7 @@ fn capture_into(
         let window_log = (target.mode == CaptureMode::Display).then(|| {
             hypr::WindowLogger::start(target.frame, started_at, Arc::clone(&request))
         });
-        let input = input::InputRecorder::start(target.frame, started_at, request);
+        let input = input::InputRecorder::start(target.frame, started_at, request, None);
         notify_for(
             &if until_stopped {
                 "Recording. Press the shortcut again to stop.".to_owned()
@@ -163,7 +163,7 @@ fn capture_into(
         toggle::clear_pidfile();
         // The input thread stops first: the screen session needs its events to pick frames.
         let events = input.stop();
-        let recording = session.stop(&events)?;
+        let recording = session.stop(&events, &[])?;
         let activity = window_log.map(hypr::WindowLogger::stop).unwrap_or_default();
         let recorded_audio = audio.and_then(|a| {
             a.stop()

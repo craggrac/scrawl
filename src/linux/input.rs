@@ -15,6 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use crate::capture::scrawl_log;
+use crate::ink::{InkState, InkTracker};
 use crate::model::{InteractionEvent, TargetFrame};
 
 pub(crate) const EV_KEY: u16 = 0x01;
@@ -556,16 +557,103 @@ pub(crate) fn drain(device: &mut File) -> Option<Vec<RawEvent>> {
     }
 }
 
-/// Records gestures on a thread until stopped.
+/// How long the input thread waits for a device before it looks at the pointer: ink wants a
+/// sample about every frame of a 120 Hz display while ⇧ draws, a held button only every
+/// `DRAG_SAMPLE_MS`.
+pub struct SamplePacer;
+
+impl SamplePacer {
+    /// The poll period while ⇧ is drawing: macOS' HID poller sleeps as long.
+    pub const INK_MS: i32 = 8;
+
+    pub fn timeout_ms(drawing: bool) -> i32 {
+        if drawing {
+            Self::INK_MS
+        } else {
+            DRAG_SAMPLE_MS as i32
+        }
+    }
+}
+
+/// One capture's gestures and ink, fed the same raw events. Holds no device, so a scripted
+/// event source drives it in tests.
+pub struct Capture {
+    gestures: Gestures,
+    ink: Option<InkTracker>,
+    events: Vec<InteractionEvent>,
+}
+
+impl Capture {
+    /// `ink` is where ⇧ draws; without it (nothing shows the ink) ⇧ is just a key.
+    pub fn new(frame: TargetFrame, layout: Layout, ink: Option<InkState>) -> Self {
+        Self {
+            gestures: Gestures::new(frame, layout),
+            ink: ink.map(|state| InkTracker::new(frame, state)),
+            events: Vec::new(),
+        }
+    }
+
+    /// Feeds one raw event read at `t` ms. Returns whether the window log should snapshot now.
+    pub fn feed(&mut self, t: u64, raw: RawEvent, cursor: CursorSource<'_>) -> bool {
+        self.events
+            .extend(self.gestures.handle(t, raw, &mut *cursor));
+        let mut snapshot = self.gestures.take_snapshot_request();
+        if let Some(ink) = self.ink.as_mut() {
+            ink.handle(t, raw, cursor);
+            snapshot |= ink.take_snapshot_request();
+        }
+        snapshot
+    }
+
+    /// Looks at the pointer: a held button's path and the ink. Returns whether the window log
+    /// should snapshot now.
+    pub fn tick(&mut self, t: u64, cursor: CursorSource<'_>) -> bool {
+        self.gestures.tick(t, &mut *cursor);
+        let Some(ink) = self.ink.as_mut() else {
+            return false;
+        };
+        ink.tick(t, cursor);
+        ink.take_snapshot_request()
+    }
+
+    /// A device went away: its modifier or button release may be lost.
+    pub fn reset(&mut self) {
+        self.gestures.reset();
+        if let Some(ink) = self.ink.as_mut() {
+            ink.reset();
+        }
+    }
+
+    /// ⇧ is drawing: look at the pointer often (`SamplePacer`).
+    pub fn drawing(&self) -> bool {
+        self.ink.as_ref().is_some_and(InkTracker::drawing)
+    }
+
+    /// The capture ends: the ink being drawn is kept in the state, and the events come back.
+    pub fn finish(mut self) -> Vec<InteractionEvent> {
+        if let Some(ink) = self.ink.as_mut() {
+            ink.finish();
+        }
+        self.events
+    }
+}
+
+/// Records gestures and ink on a thread until stopped.
 pub struct InputRecorder {
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<Vec<InteractionEvent>>>,
 }
 
 impl InputRecorder {
-    /// `request` is raised when a click or drag starts and on each shortcut, so the window log
-    /// snapshots then. The keyboard layout is read once, here.
-    pub fn start(frame: TargetFrame, started_at: Instant, request: Arc<AtomicBool>) -> Self {
+    /// `request` is raised when a click or drag starts, ink begins and on each shortcut, so the
+    /// window log snapshots then. `ink` is where ⇧ draws (none: it doesn't). The keyboard
+    /// layout is read once, here.
+    pub fn start(
+        frame: TargetFrame,
+        started_at: Instant,
+        request: Arc<AtomicBool>,
+        ink: Option<InkState>,
+    ) -> Self {
         let layout = super::hypr::keyboard_layout()
             .map_or(Layout::Us, |setting| Layout::from_setting(&setting));
         super::hypr::reset_cursor_error_log();
@@ -573,7 +661,14 @@ impl InputRecorder {
         let stop = Arc::clone(&stopping);
         let worker = thread::Builder::new()
             .name("scrawl-input".into())
-            .spawn(move || run(frame, layout, started_at, &request, &stop))
+            .spawn(move || {
+                run(
+                    Capture::new(frame, layout, ink),
+                    started_at,
+                    &request,
+                    &stop,
+                )
+            })
             .ok();
         Self { stopping, worker }
     }
@@ -593,8 +688,7 @@ impl InputRecorder {
 }
 
 fn run(
-    frame: TargetFrame,
-    layout: Layout,
+    mut capture: Capture,
     started_at: Instant,
     request: &AtomicBool,
     stopping: &AtomicBool,
@@ -602,38 +696,37 @@ fn run(
     let mut devices = open_devices();
     if devices.is_empty() {
         scrawl_log("Input: no readable /dev/input device (is the user in the input group?)");
-        return Vec::new();
+        return capture.finish();
     }
-    let mut gestures = Gestures::new(frame, layout);
-    let mut events = Vec::new();
+    let now = || started_at.elapsed().as_millis() as u64;
     let mut cursor = || super::hypr::cursor_position();
     while !stopping.load(Ordering::Acquire) {
         let mut gone = Vec::new();
-        for index in poll_readable(&devices, DRAG_SAMPLE_MS as i32) {
+        for index in poll_readable(&devices, SamplePacer::timeout_ms(capture.drawing())) {
             let Some(raws) = drain(&mut devices[index]) else {
                 gone.push(index);
                 continue;
             };
             for raw in raws {
-                let t = started_at.elapsed().as_millis() as u64;
-                events.extend(gestures.handle(t, raw, &mut cursor));
-                if gestures.take_snapshot_request() {
+                if capture.feed(now(), raw, &mut cursor) {
                     request.store(true, Ordering::Release);
                 }
             }
         }
         if !gone.is_empty() {
-            gestures.reset();
+            capture.reset();
         }
         for index in gone.into_iter().rev() {
             devices.swap_remove(index);
         }
-        gestures.tick(started_at.elapsed().as_millis() as u64, &mut cursor);
+        if capture.tick(now(), &mut cursor) {
+            request.store(true, Ordering::Release);
+        }
         if devices.is_empty() {
             break;
         }
     }
-    events
+    capture.finish()
 }
 
 #[cfg(test)]
@@ -1000,5 +1093,103 @@ mod tests {
         assert_eq!(Layout::from_setting("BR,us"), Layout::Br);
         assert_eq!(Layout::from_setting("us"), Layout::Us);
         assert_eq!(Layout::from_setting(""), Layout::Us);
+    }
+    #[test]
+    fn the_pointer_is_looked_at_every_8_ms_while_shift_draws_and_every_30_otherwise() {
+        assert_eq!(SamplePacer::timeout_ms(true), 8);
+        assert_eq!(SamplePacer::timeout_ms(false), 30);
+    }
+
+    /// A scripted event source: raw events at times, the cursor moving in between.
+    struct Script {
+        capture: Capture,
+        state: InkState,
+        at: Cell<Option<(f64, f64)>>,
+        snapshots: usize,
+    }
+
+    impl Script {
+        fn new(ink: bool) -> Self {
+            let state = InkState::default();
+            Self {
+                capture: Capture::new(frame(), Layout::Us, ink.then(|| state.clone())),
+                state,
+                at: Cell::new(Some((600.0, 300.0))),
+                snapshots: 0,
+            }
+        }
+
+        fn feed(&mut self, t: u64, raw: RawEvent) {
+            let at = &self.at;
+            let mut cursor = || at.get();
+            self.snapshots += usize::from(self.capture.feed(t, raw, &mut cursor));
+        }
+
+        fn move_to(&mut self, t: u64, to: (f64, f64)) {
+            self.at.set(Some(to));
+            let at = &self.at;
+            let mut cursor = || at.get();
+            self.snapshots += usize::from(self.capture.tick(t, &mut cursor));
+        }
+    }
+
+    #[test]
+    fn shift_draws_clicks_are_events_and_a_shift_click_is_a_pin_not_a_click() {
+        let mut script = Script::new(true);
+        // A plain click, then ⇧ + a square, then a ⇧-click.
+        script.feed(100, key(BTN_LEFT, 1));
+        script.feed(150, key(BTN_LEFT, 0));
+        script.feed(1_000, key(KEY_LEFTSHIFT, 1));
+        assert!(script.capture.drawing());
+        for (i, p) in [(0, (700.0, 300.0)), (1, (700.0, 400.0)), (2, (600.0, 400.0)), (3, (600.0, 300.0))] {
+            script.move_to(1_008 + 8 * i, p);
+        }
+        script.feed(1_100, key(BTN_LEFT, 1));
+        script.feed(1_160, key(BTN_LEFT, 0));
+        script.feed(1_300, key(KEY_LEFTSHIFT, 0));
+        assert!(!script.capture.drawing());
+        let events = script.capture.finish();
+        assert!(
+            matches!(events[..], [InteractionEvent::Click { t: 100, .. }]),
+            "{events:?}"
+        );
+        let strokes = script.state.strokes.lock().unwrap().clone();
+        let kinds: Vec<_> = strokes.iter().map(|s| (s.pin, s.pts.len() / 3)).collect();
+        // The square's four corners, from the point at the key press, then the pin.
+        assert_eq!(kinds[0].0, None);
+        assert!(kinds[0].1 >= 4, "{kinds:?}");
+        assert_eq!(kinds.last().unwrap(), &(Some(1), 1));
+        assert!(script.snapshots >= 2, "ink began, a pin dropped");
+    }
+
+    #[test]
+    fn without_an_overlay_shift_is_only_a_key() {
+        let mut script = Script::new(false);
+        script.feed(0, key(KEY_LEFTSHIFT, 1));
+        script.move_to(8, (700.0, 300.0));
+        assert!(!script.capture.drawing());
+        assert!(script.capture.finish().is_empty());
+        assert!(script.state.strokes.lock().unwrap().is_empty());
+        assert!(script.state.live.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn finishing_keeps_the_ink_being_drawn_and_a_lost_device_ends_the_hold() {
+        let mut script = Script::new(true);
+        script.feed(0, key(KEY_LEFTSHIFT, 1));
+        script.move_to(8, (700.0, 300.0));
+        script.move_to(16, (800.0, 320.0));
+        script.capture.reset();
+        // The release was lost with the device: the next look ends the ink, which is real.
+        script.move_to(24, (800.0, 330.0));
+        assert!(!script.capture.drawing());
+        assert_eq!(script.state.strokes.lock().unwrap().len(), 1);
+
+        let mut script = Script::new(true);
+        script.feed(0, key(KEY_LEFTSHIFT, 1));
+        script.move_to(8, (700.0, 300.0));
+        script.capture.finish();
+        assert_eq!(script.state.strokes.lock().unwrap().len(), 1);
+        assert!(script.state.live.lock().unwrap().is_none());
     }
 }

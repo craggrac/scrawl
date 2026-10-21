@@ -166,7 +166,12 @@ mod tracker {
             std::mem::take(&mut self.snapshot)
         }
 
-        /// ⇧ is held and drawing.
+        /// Only ⇧ is held, as of the last look: the pointer wants sampling often.
+        pub fn drawing(&self) -> bool {
+            self.drawing
+        }
+
+        /// ⇧ is held and drawing inside the target.
         pub fn shift_held(&self) -> bool {
             self.state.shift_held.load(Ordering::Acquire)
         }

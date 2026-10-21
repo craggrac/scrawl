@@ -1,6 +1,7 @@
 //! What the coordinator shares with a running capture. On macOS the event tap fills it live;
 //! here the evdev recorder (`linux::input::InputRecorder`) runs for each capture, from
-//! `reset_for_session` to `finish_session`, and hands its events over at the end.
+//! `reset_for_session` to `finish_session`: it hands its events over at the end and draws the
+//! ink live into `strokes` and `live_ink`, where the overlay and the UI read it.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -9,12 +10,19 @@ use std::time::Instant;
 use super::ShortcutConfig;
 use super::shortcut::{PressGate, PressSource};
 use crate::capture::LiveOverlayEvent;
+use crate::ink::{InkState, Wake};
 use crate::linux::input::InputRecorder;
 use crate::model::{CaptureMode, InteractionEvent, Stroke, TargetFrame};
 
-/// Where a capture's events go once `finish_session` has them, for the screen session that
-/// decodes a frame after each click (`session::ScreenCaptureSession::stop`).
-pub(super) type EventSlot = Arc<Mutex<Option<Vec<InteractionEvent>>>>;
+/// What a finished capture's input left, for the screen session that decodes a frame after
+/// each click and each stroke (`session::ScreenCaptureSession::stop`).
+pub(super) struct Handover {
+    pub events: Vec<InteractionEvent>,
+    pub strokes: Vec<Stroke>,
+}
+
+/// Where a capture's input goes once `finish_session` has it.
+pub(super) type EventSlot = Arc<Mutex<Option<Handover>>>;
 
 pub struct SharedCaptureTelemetry {
     /// Interaction is being recorded.
@@ -27,9 +35,16 @@ pub struct SharedCaptureTelemetry {
     pub target_frame: Mutex<TargetFrame>,
     /// The finished capture's events (empty while it runs: the recorder keeps them).
     pub events: Mutex<Vec<InteractionEvent>>,
-    /// Ink strokes; none on Linux until the overlay (phase 5).
-    pub strokes: Mutex<Vec<Stroke>>,
-    pub live_ink: Mutex<Option<Stroke>>,
+    /// Finished ink strokes and pins, drawn by the input recorder (`crate::ink::InkTracker`).
+    pub strokes: Arc<Mutex<Vec<Stroke>>>,
+    /// The stroke ⇧ is drawing now.
+    pub live_ink: Arc<Mutex<Option<Stroke>>>,
+    /// ⇧ is held and drawing (the overlay's tip dot).
+    pub shift_held: Arc<AtomicBool>,
+    /// The pointer in global points as of the last look while ⇧ was held.
+    pub pointer_screen: Arc<Mutex<[f32; 2]>>,
+    /// Rings the ink overlay's loop when the ink changes; nothing until an overlay attaches.
+    pub ink_wake: Arc<Wake>,
     /// Scrawl's own windows, left out of a macOS capture; `wf-recorder` records the output.
     pub excluded_window_ids: Arc<Mutex<Vec<u32>>>,
     pub passthrough_window_ids: Mutex<Vec<u32>>,
@@ -64,8 +79,11 @@ impl SharedCaptureTelemetry {
                 scale: 1.0,
             }),
             events: Mutex::new(Vec::new()),
-            strokes: Mutex::new(Vec::new()),
-            live_ink: Mutex::new(None),
+            strokes: Arc::new(Mutex::new(Vec::new())),
+            live_ink: Arc::new(Mutex::new(None)),
+            shift_held: Arc::new(AtomicBool::new(false)),
+            pointer_screen: Arc::new(Mutex::new([0.0, 0.0])),
+            ink_wake: Arc::new(Wake::default()),
             excluded_window_ids: Arc::new(Mutex::new(Vec::new())),
             passthrough_window_ids: Mutex::new(Vec::new()),
             window_log_request: Arc::new(AtomicBool::new(false)),
@@ -79,6 +97,17 @@ impl SharedCaptureTelemetry {
             input: Mutex::new(None),
             session_events: Mutex::new(None),
         })
+    }
+
+    /// The ink's shared state, for the input recorder and the overlay.
+    pub fn ink_state(&self) -> InkState {
+        InkState {
+            strokes: Arc::clone(&self.strokes),
+            live: Arc::clone(&self.live_ink),
+            shift_held: Arc::clone(&self.shift_held),
+            pointer: Arc::clone(&self.pointer_screen),
+            wake: Arc::clone(&self.ink_wake),
+        }
     }
 
     /// The record shortcut, from wherever it was seen.
@@ -176,10 +205,19 @@ impl SharedCaptureTelemetry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        *self
+            .live_ink
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        self.shift_held.store(false, Ordering::Release);
         self.selecting.store(false, Ordering::Release);
         self.active.store(true, Ordering::Release);
-        let recorder =
-            InputRecorder::start(frame, started_at, Arc::clone(&self.window_log_request));
+        let recorder = InputRecorder::start(
+            frame,
+            started_at,
+            Arc::clone(&self.window_log_request),
+            Some(self.ink_state()),
+        );
         // A recorder left from a capture that never finished stops here.
         if let Some(old) = self
             .input
@@ -204,8 +242,8 @@ impl SharedCaptureTelemetry {
         self.escape.swap(false, Ordering::AcqRel)
     }
 
-    /// Ends the capture's input recording: its events (also handed to the screen session) and
-    /// no strokes.
+    /// Ends the capture's input recording: its events and the ink strokes (both also handed to
+    /// the screen session, and the strokes cleared from the shared state).
     pub fn finish_session(&self) -> (Vec<InteractionEvent>, Vec<Stroke>) {
         self.active.store(false, Ordering::Release);
         let recorder = self
@@ -213,7 +251,16 @@ impl SharedCaptureTelemetry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        // The recorder's thread ends first: it keeps the stroke being drawn.
         let events = recorder.map(InputRecorder::stop).unwrap_or_default();
+        *self
+            .live_ink
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        self.shift_held.store(false, Ordering::Release);
+        let strokes = std::mem::take(
+            &mut *self.strokes.lock().unwrap_or_else(PoisonError::into_inner),
+        );
         *self.events.lock().unwrap_or_else(PoisonError::into_inner) = events.clone();
         if let Some(slot) = self
             .session_events
@@ -221,8 +268,88 @@ impl SharedCaptureTelemetry {
             .unwrap_or_else(PoisonError::into_inner)
             .take()
         {
-            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(events.clone());
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Handover {
+                events: events.clone(),
+                strokes: strokes.clone(),
+            });
         }
-        (events, Vec::new())
+        (events, strokes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stroke(t0: u64, pin: Option<u32>) -> Stroke {
+        Stroke {
+            t0,
+            t1: t0 + 100,
+            fw: 1920,
+            fh: 1080,
+            on: None,
+            pin,
+            laser: false,
+            pts: vec![100, 100, 0, 200, 200, 50],
+        }
+    }
+
+    fn frame() -> TargetFrame {
+        TargetFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+            scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn finishing_a_session_returns_its_strokes_and_hands_them_to_the_screen_session() {
+        let (sender, _receiver) = flume::unbounded();
+        let telemetry = SharedCaptureTelemetry::new(sender);
+        let slot: EventSlot = Arc::new(Mutex::new(None));
+        telemetry.hand_events_to(Arc::clone(&slot));
+        telemetry.strokes.lock().unwrap().push(stroke(10, None));
+        telemetry.strokes.lock().unwrap().push(stroke(20, Some(1)));
+        *telemetry.live_ink.lock().unwrap() = Some(stroke(30, None));
+        telemetry.shift_held.store(true, Ordering::Release);
+
+        let (events, strokes) = telemetry.finish_session();
+        assert!(events.is_empty());
+        assert_eq!(strokes.len(), 2);
+        assert_eq!(strokes[1].pin, Some(1));
+        // The shared state is clean for whatever draws next, and the screen session has them.
+        assert!(telemetry.strokes.lock().unwrap().is_empty());
+        assert!(telemetry.live_ink.lock().unwrap().is_none());
+        assert!(!telemetry.shift_held.load(Ordering::Acquire));
+        let handed = slot.lock().unwrap().take().expect("handed over");
+        assert_eq!(handed.strokes, strokes);
+    }
+
+    #[test]
+    fn a_new_session_starts_without_the_last_ones_ink() {
+        let (sender, _receiver) = flume::unbounded();
+        let telemetry = SharedCaptureTelemetry::new(sender);
+        telemetry.strokes.lock().unwrap().push(stroke(10, None));
+        *telemetry.live_ink.lock().unwrap() = Some(stroke(30, None));
+        telemetry.shift_held.store(true, Ordering::Release);
+        telemetry.reset_for_session(frame());
+        assert!(telemetry.strokes.lock().unwrap().is_empty());
+        assert!(telemetry.live_ink.lock().unwrap().is_none());
+        assert!(!telemetry.shift_held.load(Ordering::Acquire));
+        let (_, strokes) = telemetry.finish_session();
+        assert!(strokes.is_empty());
+    }
+
+    #[test]
+    fn the_ink_state_shares_what_the_telemetry_shows() {
+        let (sender, _receiver) = flume::unbounded();
+        let telemetry = SharedCaptureTelemetry::new(sender);
+        let state = telemetry.ink_state();
+        state.strokes.lock().unwrap().push(stroke(1, None));
+        assert_eq!(telemetry.strokes.lock().unwrap().len(), 1);
+        state.shift_held.store(true, Ordering::Release);
+        assert!(telemetry.shift_held.load(Ordering::Acquire));
     }
 }
