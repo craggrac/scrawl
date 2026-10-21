@@ -74,7 +74,7 @@ fn frame_rate(rate: &str) -> f64 {
 /// Adds `movie` as the input, locked down: only the local `file` protocol and movie containers
 /// are allowed, so a crafted playlist can't make ffmpeg fetch URLs or read other files, and the
 /// `file:` prefix keeps a path starting with `-` or `proto:` from being misread.
-fn input(command: &mut Command, movie: &Path) {
+pub(crate) fn input(command: &mut Command, movie: &Path) {
     let mut url = OsString::from("file:");
     url.push(movie);
     command

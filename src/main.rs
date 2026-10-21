@@ -368,12 +368,13 @@ enum Command {
     },
     /// Export a bundle's recording as one shareable .mp4: H.264 video cropped to the activity
     /// with the ink and click ripples burned in, AAC audio in sync, and optionally Screen
-    /// Studio-style auto-zoom (`--zoom`). Encoding runs in the helper with AVFoundation.
+    /// Studio-style auto-zoom (`--zoom`). Encoding runs in the helper with AVFoundation (macOS)
+    /// or with ffmpeg (Linux, where the ink is already part of the recording).
     Export {
         /// Path to `.scrawl` bundle directory or `latest`.
         #[arg(default_value = "latest")]
         bundle: PathBuf,
-        /// Output file (defaults to ~/Movies/Scrawl/<bundle>.mp4).
+        /// Output file (defaults to ~/Movies/Scrawl/<bundle>.mp4, or <Videos>/Scrawl on Linux).
         #[arg(long)]
         out: Option<PathBuf>,
         /// `full`, `auto` (the activity region), or `x,y,w,h` as fractions of the capture (all
@@ -387,7 +388,7 @@ enum Command {
         /// nearby, and ease back out.
         #[arg(long)]
         zoom: bool,
-        /// Leave out the red ink, pins and laser.
+        /// Leave out the red ink, pins and laser (no effect on Linux: the recording has them).
         #[arg(long)]
         no_ink: bool,
         /// Leave out click ripples and touch trails.
@@ -2059,6 +2060,13 @@ fn main() -> Result<()> {
             hevc,
             fps,
         } => {
+            #[cfg(target_os = "linux")]
+            if no_ink {
+                eprintln!(
+                    "Note: --no-ink does nothing on Linux. The ink is drawn on the screen while \
+                     recording, so it is already in recording.mp4; only click ripples can be left out."
+                );
+            }
             let (dir, loaded) = handoff::load_bundle(&bundle)?;
             let options = export::Options {
                 out,
