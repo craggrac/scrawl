@@ -96,6 +96,9 @@ Alt or Super draws nothing, and a ⇧ tap on the spot (a capital letter) leaves 
   macOS leaves its overlay out of the capture; `wf-recorder` can't exclude a layer. The keyframes
   are redrawn from the strokes as before, a little bolder than the video's ink, so they cover it
   rather than doubling it. Nothing else of Scrawl's is drawn into a recording: no dim, no glow.
+- **Needs `scrawl app`.** The ink is tracked and drawn by the app. A headless `scrawl record` or
+  `scrawl toggle` with no app running draws no ink, and records no strokes or pins: clicks, drags
+  and scrolling are noted as before.
 - **Needs `zwlr_layer_shell_v1`.** Hyprland, sway and the other wlroots-protocol compositors have
   it; GNOME's Mutter doesn't, and there the log says "Metal overlay failed" and recordings go on
   without ink. The overlay sits over the output holding the target's centre. It maps nothing until
