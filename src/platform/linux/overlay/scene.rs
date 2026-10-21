@@ -3,8 +3,8 @@
 //! because there it is entangled with the Metal buffer structs: keep the constants and the
 //! fade in step with it. Laser strokes are not drawn (nothing on macOS makes one either).
 
-use crate::model::Stroke;
-use crate::sketch::smooth_ink_points;
+use crate::model::{InkColor, Stroke};
+use crate::sketch::{figure_segments, smooth_ink_points};
 
 /// Segments drawn at most; past it the oldest go, so the tip being drawn keeps showing.
 pub const MAX_SEGMENTS: usize = 16_384;
@@ -15,6 +15,8 @@ pub const PIN_RADIUS_PT: f32 = 11.5;
 /// Finished ink stays at full opacity this long after its last point, then fades over as long.
 pub const HOLD_MS: u64 = 650;
 pub const FADE_MS: u64 = 650;
+/// How thick an arrow's or a box's lines are, in points: the ink at a pressure of 1.
+pub const FIGURE_WIDTH_PT: f32 = 4.5;
 
 /// One piece of ink: a line from `a` to `b` whose width follows `w0` to `w1` (the simulated
 /// pen pressure), at `alpha` of full opacity.
@@ -25,6 +27,7 @@ pub struct Segment {
     pub w0: f32,
     pub w1: f32,
     pub alpha: f32,
+    pub color: InkColor,
 }
 
 /// A numbered pin's marker (the number is only on the keyframes).
@@ -38,8 +41,9 @@ pub struct Pin {
 pub struct Scene {
     pub segments: Vec<Segment>,
     pub pins: Vec<Pin>,
-    /// The dot at the pointer while ⇧ is held.
+    /// The dot at the pointer while ⇧ is held, in the colour ink is drawn in.
     pub tip: Option<[f32; 2]>,
+    pub tip_color: InkColor,
 }
 
 impl Scene {
@@ -80,13 +84,13 @@ pub fn animating(strokes: &[Stroke], live: Option<&Stroke>, now_ms: u64) -> bool
 
 /// The scene at `now_ms` (the capture clock) for `strokes` (finished, oldest first) and the
 /// stroke being drawn. `target` is the recorded rect in output points; `tip` is the pointer
-/// in output points while ⇧ is held and the capture runs.
+/// in output points, with the colour of the dot, while ⇧ is held and the capture runs.
 pub fn build(
     strokes: &[Stroke],
     live: Option<&Stroke>,
     now_ms: u64,
     target: [f32; 4],
-    tip: Option<[f32; 2]>,
+    tip: Option<([f32; 2], InkColor)>,
 ) -> Scene {
     let mut segments = Vec::with_capacity(256);
     let mut pins = Vec::new();
@@ -123,6 +127,22 @@ pub fn build(
             .into_iter()
             .map(|p| to_output(target, p))
             .collect();
+        // A figure is its two ends (a figure with just one yet shows nothing).
+        if let Some(shape) = stroke.shape {
+            if let [a, b] = points[..] {
+                for (a, b) in figure_segments(shape, a, b, FIGURE_WIDTH_PT) {
+                    segments.push(Segment {
+                        a,
+                        b,
+                        w0: 1.0,
+                        w1: 1.0,
+                        alpha,
+                        color: stroke.color,
+                    });
+                }
+            }
+            continue;
+        }
         for pair in smooth_ink_points(&points).windows(2) {
             segments.push(Segment {
                 a: pair[0].0,
@@ -130,6 +150,7 @@ pub fn build(
                 w0: pair[0].1,
                 w1: pair[1].1,
                 alpha,
+                color: stroke.color,
             });
         }
     }
@@ -139,7 +160,8 @@ pub fn build(
     Scene {
         segments,
         pins,
-        tip,
+        tip: tip.map(|(at, _)| at),
+        tip_color: tip.map_or(InkColor::Red, |(_, color)| color),
     }
 }
 
@@ -240,10 +262,13 @@ mod tests {
     #[test]
     fn the_tip_dot_is_the_pointer_and_only_when_given() {
         let tip = [321.5, 40.0];
-        assert_eq!(build(&[], None, 0, TARGET, Some(tip)).tip, Some(tip));
+        assert_eq!(
+            build(&[], None, 0, TARGET, Some((tip, InkColor::Red))).tip,
+            Some(tip)
+        );
         assert_eq!(build(&[], None, 0, TARGET, None).tip, None);
         assert!(build(&[], None, 0, TARGET, None).is_empty());
-        assert!(!build(&[], None, 0, TARGET, Some(tip)).is_empty());
+        assert!(!build(&[], None, 0, TARGET, Some((tip, InkColor::Red))).is_empty());
     }
 
     #[test]
