@@ -4538,6 +4538,7 @@ impl Render for BundleReviewWindow {
         let c_tab_frames = self.coordinator.clone();
         let copy_dir = dir.clone();
         let send_dir = dir.clone();
+        let (agent_coord, agent_dir) = (self.coordinator.clone(), dir.clone());
 
         div()
             .id("scrawl-review-root")
@@ -4750,7 +4751,8 @@ impl Render for BundleReviewWindow {
                                         cx.notify();
                                     });
                                 }),
-                            ),
+                            )
+                            .children(agent_send_button(&agent_coord, &agent_dir)),
                     ),
             )
             .child(
@@ -5066,6 +5068,48 @@ fn button_base(id: &'static str, primary: bool) -> gpui::Stateful<Div> {
 
 fn action_button(id: &'static str, label: &str, primary: bool) -> gpui::Stateful<Div> {
     button_base(id, primary).child(SharedString::from(label.to_string()))
+}
+
+/// Linux: sends the capture to the coding agent chosen in Settings (`sendTarget`), on a click.
+#[cfg(target_os = "linux")]
+fn agent_send_button(
+    coordinator: &Entity<ScrawlCoordinator>,
+    dir: &std::path::Path,
+) -> Option<gpui::Stateful<Div>> {
+    let target = crate::agent_send::Target::configured();
+    let (coordinator, dir) = (coordinator.clone(), dir.to_owned());
+    let label = format!("Send to {}", target.label());
+    Some(action_button("btn-send-agent", &label, false).on_click(move |_, _, cx| {
+        let (coordinator, dir) = (coordinator.clone(), dir.clone());
+        coordinator.update(cx, |coord, cx| {
+            coord.review_status = Some(format!("Sending to {}…", target.label()));
+            cx.notify();
+        });
+        let sent = {
+            let dir = dir.clone();
+            cx.background_executor()
+                .spawn(async move { crate::agent_send::send(&dir, target) })
+        };
+        cx.spawn(async move |cx| {
+            let result = sent.await;
+            let _ = coordinator.update(cx, |coord, cx| {
+                coord.review_status = Some(match result {
+                    Ok(done) => {
+                        coord.mark_handled(&dir);
+                        done
+                    }
+                    Err(error) => format!("Send failed: {error:#}"),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn agent_send_button(_: &Entity<ScrawlCoordinator>, _: &std::path::Path) -> Option<gpui::Stateful<Div>> {
+    None
 }
 
 /// Button with a trailing muted hint, e.g. a keyboard shortcut.

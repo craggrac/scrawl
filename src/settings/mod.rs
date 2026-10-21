@@ -1094,6 +1094,12 @@ impl Panel {
             ("autoSend" | "videoExport", serde_json::Value::Bool(on)) => write(key, (*on).into()),
             #[cfg(target_os = "linux")]
             ("devContext", serde_json::Value::Bool(on)) => write(key, (*on).into()),
+            #[cfg(target_os = "linux")]
+            ("sendTarget", serde_json::Value::String(name)) => {
+                if let Ok(target) = <crate::agent_send::Target as clap::ValueEnum>::from_str(name, true) {
+                    write(key, target.name().into());
+                }
+            }
             ("microphone", serde_json::Value::String(id)) => {
                 let inputs = self.inputs.clone().unwrap_or_default();
                 if let Err(error) = crate::mic::save_in(&path, id, &inputs) {
@@ -1941,6 +1947,18 @@ mod tests {
         set(&mut panel, &mut host, "retention", "forever".into());
         // "Forever" says it all; no caption.
         assert_eq!(panel.view(&host).retention.note, "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_send_target_takes_claude_or_t3_and_nothing_else() {
+        let dir = TempDir::new("sendtarget");
+        let mut host = fake(&dir);
+        let mut panel = Panel::default();
+        for (value, saved) in [("t3", "t3"), ("Claude", "claude"), ("opencode", "claude")] {
+            set(&mut panel, &mut host, "sendTarget", value.into());
+            assert_eq!(read_json(&host.path)["sendTarget"], saved);
+        }
     }
 
     #[cfg(target_os = "linux")]
