@@ -340,8 +340,9 @@ pub fn export(
     })
 }
 
-/// A file the manifest names, inside the bundle: a plain relative path, so a crafted manifest
-/// can't point the renderer at some other file on the machine.
+/// A file the manifest names, inside the bundle: a plain relative path that still resolves
+/// inside the bundle once symlinks are followed, so a crafted bundle can't point the renderer at
+/// some other file on the machine.
 fn member(dir: &Path, name: &str) -> Result<PathBuf> {
     let relative = Path::new(name);
     ensure!(
@@ -351,7 +352,15 @@ fn member(dir: &Path, name: &str) -> Result<PathBuf> {
                 .all(|part| matches!(part, std::path::Component::Normal(_))),
         "The bundle names a file outside itself: {name}"
     );
-    Ok(dir.join(relative))
+    let path = dir.join(relative);
+    // A missing file is the caller's to report; one that exists must not be a link out.
+    if let (Ok(root), Ok(resolved)) = (dir.canonicalize(), path.canonicalize()) {
+        ensure!(
+            resolved.starts_with(&root),
+            "The bundle names a file outside itself: {name}"
+        );
+    }
+    Ok(path)
 }
 
 fn wav_duration_ms(path: &Path) -> Result<u64> {
@@ -517,6 +526,21 @@ mod tests {
         for bad in ["/etc/passwd", "../other/audio.wav", "a/../../b", "", ".", "a/.."] {
             assert!(member(dir, bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_manifest_file_cant_be_a_link_out_of_the_bundle() {
+        let root = std::env::temp_dir().join(format!("scrawl-member-{}", std::process::id()));
+        let dir = root.join("x.scrawl");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join("secret"), b"").unwrap();
+        std::fs::write(dir.join("audio.wav"), b"").unwrap();
+        std::os::unix::fs::symlink(root.join("secret"), dir.join("link.wav")).unwrap();
+        std::os::unix::fs::symlink(dir.join("audio.wav"), dir.join("inside.wav")).unwrap();
+        assert!(member(&dir, "audio.wav").is_ok());
+        assert!(member(&dir, "inside.wav").is_ok());
+        assert!(member(&dir, "link.wav").is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(target_os = "macos")]
