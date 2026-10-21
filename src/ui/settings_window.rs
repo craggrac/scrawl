@@ -411,6 +411,7 @@ impl SettingsWindow {
     fn recording_pane(&self, cx: &mut Context<Self>) -> Div {
         let parakeet = &self.view.parakeet;
         let export = self.view.video_export;
+        let replay = self.view.replay_buffer;
         div()
             .flex()
             .flex_col()
@@ -447,6 +448,21 @@ impl SettingsWindow {
             .child(caption(
                 "Adds Export Last Capture as Video… to the tray menu (saved to Videos/Scrawl). \
                  scrawl export works without it.",
+                false,
+            ))
+            .child(group().child(row(
+                "Replay buffer",
+                switch("replay-buffer", replay, true).on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.act(Self::set_bool("replayBuffer", !replay), window, cx);
+                    },
+                )),
+            )))
+            .child(caption(
+                "Keeps the last 30 s of the screen and the microphone in memory so scrawl replay \
+                 (or Save Last 30 s in the tray) can save what just happened. The microphone is \
+                 recording the whole time Scrawl runs, and the shell's privacy indicator does not \
+                 show it. Paused during recordings and while the screen is locked.",
                 false,
             ))
     }
