@@ -911,6 +911,7 @@ mod tests {
             pin: None,
             on: None,
             description: "tapped x 0.50, y 0.50".into(),
+            color: Default::default(),
             frame: None,
         }
     }

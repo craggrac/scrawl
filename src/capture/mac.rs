@@ -1401,6 +1401,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: pts.iter().flat_map(|&(x, y, t)| [x, y, t]).collect(),
         };
         let press = telemetry.elapsed_ms() + 50;
@@ -2585,6 +2587,8 @@ impl SharedCaptureTelemetry {
             on: None,
             pin: Some(number),
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![
                 (nx * SCALE as f32).round() as i32,
                 (ny * SCALE as f32).round() as i32,
@@ -3227,6 +3231,8 @@ fn run_global_hid_poller(telemetry: Arc<SharedCaptureTelemetry>) {
                 on: None,
                 pin: None,
                 laser: false,
+                color: Default::default(),
+                shape: None,
                 pts: Vec::new(),
             });
             let dt = t_ms.saturating_sub(stroke.t0) as i32;

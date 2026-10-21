@@ -321,6 +321,8 @@ mod tracker {
                 on: None,
                 pin: Some(number),
                 laser: false,
+                color: Default::default(),
+                shape: None,
                 pts: vec![
                     (nx * SCALE as f32).round() as i32,
                     (ny * SCALE as f32).round() as i32,
@@ -397,6 +399,8 @@ mod tracker {
                 on: None,
                 pin: None,
                 laser: false,
+                color: Default::default(),
+                shape: None,
                 pts: Vec::new(),
             });
             let dt = t.saturating_sub(stroke.t0) as i32;

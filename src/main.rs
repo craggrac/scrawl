@@ -963,6 +963,7 @@ pub fn build_bundle_from_parts(
             pin: None,
             on: None,
             description: "flagged this moment".into(),
+            color: Default::default(),
             frame: None,
         });
     }
@@ -1310,6 +1311,8 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         on: Some("Band header".into()),
         pin: None,
         laser: false,
+        color: Default::default(),
+        shape: None,
         pts: circle_pts,
     };
 
@@ -1329,6 +1332,8 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         on: Some("Used 12 tools".into()),
         pin: None,
         laser: false,
+        color: Default::default(),
+        shape: None,
         pts: shaft_pts,
     };
     let arrow_head = Stroke {
@@ -1339,6 +1344,8 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         on: Some("Used 12 tools".into()),
         pin: None,
         laser: false,
+        color: Default::default(),
+        shape: None,
         pts: vec![
             (0.41 * SCALE as f32) as i32,
             (0.35 * SCALE as f32) as i32,
@@ -1361,6 +1368,8 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         on: Some("Send button".into()),
         pin: Some(1),
         laser: false,
+        color: Default::default(),
+        shape: None,
         pts: vec![
             (0.88 * SCALE as f32) as i32,
             (0.88 * SCALE as f32) as i32,

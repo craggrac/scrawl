@@ -1,6 +1,8 @@
 //! PNG output and deterministic, CPU-rendered review images.
 use crate::model::*;
-use crate::sketch::{FreehandOptions, freehand_outline, slice_laser_window, smooth_laser_points};
+use crate::sketch::{
+    FreehandOptions, figure_segments, freehand_outline, slice_laser_window, smooth_laser_points,
+};
 use std::path::Path;
 
 type Color = [u8; 4];
@@ -351,6 +353,8 @@ pub fn annotate_keyframe_marks_in_place(
         if !active {
             continue;
         }
+        let [red, green, blue] = stroke.color.rgb();
+        let color = [red, green, blue, 255];
         let points: Vec<[f32; 2]> = stroke
             .timed_points()
             .into_iter()
@@ -367,6 +371,13 @@ pub fn annotate_keyframe_marks_in_place(
                     1.0,
                 );
             }
+        } else if let Some(shape) = stroke.shape {
+            // Both ends have been drawn by then, or there is nothing to show yet.
+            if let [a, b] = points[..] {
+                for (from, to) in figure_segments(shape, a, b, size) {
+                    line(frame, from, to, size * 0.5, size * 0.5, color);
+                }
+            }
         } else if !points.is_empty() {
             let outline = freehand_outline(
                 &points,
@@ -375,7 +386,7 @@ pub fn annotate_keyframe_marks_in_place(
                     ..Default::default()
                 },
             );
-            polygon(frame, &outline, RED);
+            polygon(frame, &outline, color);
         }
     }
     if shown.len() >= 2 && crate::handoff::experiment(crate::handoff::AGENT_CONTEXT) {
@@ -2051,6 +2062,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![1500, 6000, 0, 5000, 6000, 200, 8500, 6000, 400],
         };
         let result = render_annotated_keyframe(&base, &key(1), &[stroke.clone()], &[], &[]);
@@ -2074,6 +2087,97 @@ mod tests {
         assert!(base.rgba.chunks_exact(4).all(|p| p == [20, 20, 20, 255]));
     }
 
+    /// A stroke of `shape` (or freehand) in a 320 x 200 frame, just before key 1.
+    fn figure_stroke(shape: Option<InkShape>, color: InkColor, pts: Vec<i32>) -> Stroke {
+        Stroke {
+            t0: 3500,
+            t1: 3900,
+            fw: 320,
+            fh: 200,
+            on: None,
+            pin: None,
+            laser: false,
+            color,
+            shape,
+            pts,
+        }
+    }
+
+    fn painted(frame: &RgbaFrame, x: usize, y: usize, rgb: [u8; 3]) -> bool {
+        let at = (y * frame.width as usize + x) * 4;
+        frame.rgba[at..at + 4] == [rgb[0], rgb[1], rgb[2], 255]
+    }
+
+    #[test]
+    fn ink_keeps_its_colour_on_the_keyframe() {
+        let base = solid(320, 200, [20, 20, 20, 255]);
+        for color in [
+            InkColor::Red,
+            InkColor::Yellow,
+            InkColor::Green,
+            InkColor::Blue,
+        ] {
+            let stroke = figure_stroke(
+                None,
+                color,
+                vec![1500, 6000, 0, 5000, 6000, 100, 8500, 6000, 200],
+            );
+            let result = render_annotated_keyframe(&base, &key(1), &[stroke], &[], &[]);
+            assert!(painted(&result, 160, 120, color.rgb()), "{color:?}");
+        }
+    }
+
+    #[test]
+    fn an_arrow_stroke_is_a_shaft_with_a_head_and_a_box_stroke_is_hollow() {
+        let base = solid(320, 200, [20, 20, 20, 255]);
+        let arrow = figure_stroke(
+            Some(InkShape::Arrow),
+            InkColor::Yellow,
+            vec![2000, 6000, 0, 8000, 6000, 200],
+        );
+        let result = render_annotated_keyframe(&base, &key(1), &[arrow], &[], &[]);
+        let yellow = InkColor::Yellow.rgb();
+        // The shaft from x 64 to 256 along y 120, and head strokes behind the tip above and below.
+        assert!(painted(&result, 160, 120, yellow));
+        let head = |mut ys: std::ops::Range<usize>| {
+            ys.any(|y| (240..252).any(|x| painted(&result, x, y, yellow)))
+        };
+        assert!(head(112..117) && head(124..129), "the head's two strokes");
+        assert!(!head(100..110) && !head(130..140), "and no more");
+        assert!(!painted(&result, 160, 100, yellow));
+
+        let boxed = figure_stroke(
+            Some(InkShape::Box),
+            InkColor::Blue,
+            vec![2000, 4000, 0, 8000, 8000, 200],
+        );
+        let result = render_annotated_keyframe(&base, &key(1), &[boxed], &[], &[]);
+        let blue = InkColor::Blue.rgb();
+        // Left, right, top and bottom sides (x 64..256, y 80..160); the inside is untouched.
+        for (x, y) in [(64, 120), (256, 120), (160, 80), (160, 160)] {
+            assert!(painted(&result, x, y, blue), "{x},{y}");
+        }
+        assert_eq!(
+            &result.rgba[(120 * 320 + 160) * 4..][..4],
+            [20, 20, 20, 255]
+        );
+    }
+
+    #[test]
+    fn a_figure_whose_end_is_not_drawn_yet_is_not_shown() {
+        let base = solid(320, 200, [20, 20, 20, 255]);
+        let mut arrow = figure_stroke(
+            Some(InkShape::Arrow),
+            InkColor::Red,
+            vec![2000, 6000, 0, 8000, 6000, 1100],
+        );
+        arrow.t0 = 3500;
+        arrow.t1 = 4600;
+        // Key 1 is at 4.0 s: the second end (4.6 s) is still to come.
+        let result = render_annotated_keyframe(&base, &key(1), &[arrow], &[], &[]);
+        assert_eq!(&result.rgba[100 * 320 * 4..], &base.rgba[100 * 320 * 4..]);
+    }
+
     #[test]
     fn a_grouped_keyframe_shows_every_mark_drawn_on_its_screen() {
         let base = solid(320, 200, [20, 20, 20, 255]);
@@ -2086,6 +2190,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![1500, y, 0, 5000, y, 100, 8500, y, 200],
         };
         let strokes = [stroke(6000), stroke(7500), stroke(9000)];
@@ -2101,6 +2207,7 @@ mod tests {
             pin: None,
             on: None,
             description: String::new(),
+            color: Default::default(),
             frame: Some(frame.into()),
         };
         let mut keyframe = key(1);

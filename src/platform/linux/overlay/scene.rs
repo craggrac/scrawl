@@ -158,6 +158,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: points
                 .iter()
                 .enumerate()

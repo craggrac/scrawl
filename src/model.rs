@@ -346,8 +346,61 @@ pub struct Stroke {
     pub pin: Option<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub laser: bool,
+    /// The ink's colour; a stroke without one is red.
+    #[serde(default, skip_serializing_if = "InkColor::is_red")]
+    pub color: InkColor,
+    /// Set when the stroke is a straight figure (an arrow or a box) rather than freehand: its
+    /// `pts` are then just the two ends (the box's opposite corners).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<InkShape>,
     /// Flat triples `[x, y, dt_ms, ...]` where `x, y` are in `0..=SCALE` and `dt_ms` is ms since `t0`.
     pub pts: Vec<i32>,
+}
+
+/// What colour ink was drawn in (Linux: ⇧ + 1 to 4).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InkColor {
+    #[default]
+    Red,
+    Yellow,
+    Green,
+    Blue,
+}
+
+impl InkColor {
+    pub fn is_red(&self) -> bool {
+        *self == Self::Red
+    }
+
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            Self::Red => [255, 59, 48],
+            Self::Yellow => [255, 204, 0],
+            Self::Green => [52, 199, 89],
+            Self::Blue => [10, 132, 255],
+        }
+    }
+
+    /// How a summary names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Red => "red",
+            Self::Yellow => "yellow",
+            Self::Green => "green",
+            Self::Blue => "blue",
+        }
+    }
+}
+
+/// A figure ink is drawn as with a modifier held, instead of following the pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InkShape {
+    /// A straight line from the first point to the second, with a head at the second.
+    Arrow,
+    /// The rectangle with the two points as opposite corners.
+    Box,
 }
 
 impl Stroke {
@@ -405,6 +458,8 @@ pub enum Shape {
     Underline,
     Line,
     Arrow,
+    /// A rectangle drawn around something (an `InkShape::Box` stroke).
+    Box,
     Tap,
     Pin,
     Mark,
@@ -433,6 +488,9 @@ pub struct Mark {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
+    /// The colour of the mark's biggest stroke (red unless the ink was picked otherwise).
+    #[serde(default, skip_serializing_if = "InkColor::is_red")]
+    pub color: InkColor,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -671,6 +729,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![10, 20, 0, 30, 40, 300],
         };
         assert!(!before.rebase(500));
@@ -683,6 +743,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![10, 20, 0, 20, 30, 150, 30, 40, 200, 50, 60, 400],
         };
         assert!(spanning.rebase(500));
@@ -698,6 +760,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![10, 20, 0, 50, 60, 200],
         };
         assert!(after.rebase(500));

@@ -521,6 +521,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![0, 0, 0],
         };
         let mut strokes = vec![stroke(500), stroke(600)];
@@ -577,6 +579,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: vec![1000, 5000, 0, 3000, 5050, 5],
         };
         let (x, y) = stroke_probe_point(&flat, frame).unwrap();

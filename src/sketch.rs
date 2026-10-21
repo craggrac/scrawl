@@ -23,6 +23,11 @@ pub fn shape_of(stroke: &Stroke) -> Shape {
     if stroke.pin.is_some() {
         return Shape::Pin;
     }
+    match stroke.shape {
+        Some(InkShape::Arrow) => return Shape::Arrow,
+        Some(InkShape::Box) => return Shape::Box,
+        None => {}
+    }
     let points: Vec<_> = stroke
         .normalized_points()
         .into_iter()
@@ -105,6 +110,7 @@ pub fn marks_of(strokes: &[Stroke]) -> Vec<Mark> {
                 on: group.iter().find_map(|&j| strokes[j].on.clone()),
                 strokes: group.clone(),
                 description: String::new(),
+                color: Default::default(),
                 frame: None,
             };
             if first.pin.is_some() {
@@ -131,6 +137,20 @@ pub fn marks_of(strokes: &[Stroke]) -> Vec<Mark> {
                 let rest = &sized[1..];
                 let a = pts.first().copied().unwrap_or([0.0; 2]);
                 let z = pts.last().copied().unwrap_or(a);
+                mark.color = main.color;
+                // A straight arrow or box is what it was drawn as, whatever else is near.
+                match shape {
+                    Shape::Arrow => {
+                        mark.shape = Shape::Arrow;
+                        mark.from = Some(a);
+                        mark.to = Some(z);
+                    }
+                    Shape::Box => {
+                        mark.shape = Shape::Box;
+                        mark.box_norm = *b;
+                    }
+                    _ => {}
+                }
                 if matches!(shape, Shape::Line | Shape::Underline) && (1..=2).contains(&rest.len())
                 {
                     let px = |p: [f32; 2]| [p[0] * main.fw as f32, p[1] * main.fh as f32];
@@ -203,11 +223,15 @@ pub fn describe_mark(mark: &Mark) -> String {
             at(mark.from.unwrap_or([x0, y0])),
             at(mark.to.unwrap_or([x1, y1]))
         ),
+        Shape::Box => format!("boxed region {region}{many}"),
         Shape::Pin => format!("pin {} at {}", mark.pin.unwrap_or(1), at([x0, y0])),
         Shape::Tap => format!("tapped {}{many}", at([(x0 + x1) / 2.0, (y0 + y1) / 2.0])),
         Shape::Mark => format!("marked region {region}{many}"),
         Shape::Flag => "flagged this moment".into(),
     };
+    if !mark.color.is_red() {
+        text.push_str(&format!(" in {}", mark.color.name()));
+    }
     if let Some(on) = &mark.on {
         text.push_str(&format!(" over {}", quote_label(on)));
     }
@@ -221,6 +245,37 @@ pub(crate) fn quote_label(label: &str) -> String {
         label.to_owned()
     } else {
         format!("“{label}”")
+    }
+}
+
+/// The straight pieces an arrow or a box is drawn with, for ink `width` thick, between `a` and
+/// `b` (in any one unit): an arrow is its shaft and two strokes of a head at `b`, a box its four
+/// sides. Every renderer strokes them with round caps, so the figure looks the same everywhere.
+pub fn figure_segments(
+    shape: InkShape,
+    a: [f32; 2],
+    b: [f32; 2],
+    width: f32,
+) -> Vec<([f32; 2], [f32; 2])> {
+    match shape {
+        InkShape::Arrow => {
+            let len = distance(a, b);
+            if len <= f32::EPSILON {
+                return Vec::new();
+            }
+            // The head is four widths long, but never more than half of a short arrow.
+            let head = (width * 4.0).min(len * 0.5);
+            let back = lerp(b, a, head / len);
+            let wing = |angle: f32| rotate(back, b, angle);
+            let spread = 28.0_f32.to_radians();
+            vec![(a, b), (b, wing(spread)), (b, wing(-spread))]
+        }
+        InkShape::Box => {
+            let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+            let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+            let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+            (0..4).map(|i| (corners[i], corners[(i + 1) % 4])).collect()
+        }
     }
 }
 
@@ -1174,6 +1229,8 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            color: Default::default(),
+            shape: None,
             pts: points
                 .iter()
                 .flat_map(|p| {
@@ -1226,6 +1283,93 @@ mod tests {
                 describe_mark(&marks[0]),
                 "drew an arrow from x 0.20, y 0.80 pointing to x 0.50, y 0.50"
             );
+        }
+    }
+
+    fn figure(shape: InkShape, a: [f32; 2], b: [f32; 2]) -> Stroke {
+        Stroke {
+            shape: Some(shape),
+            ..stroke(&[a, b], 0)
+        }
+    }
+
+    #[test]
+    fn a_straight_arrow_is_an_arrow_mark_from_where_it_started_to_where_it_ended() {
+        // Straight, and flatter than any underline, so freehand rules would call it a line.
+        let marks = marks_of(&[figure(InkShape::Arrow, [0.7, 0.30], [0.2, 0.32])]);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].shape, Shape::Arrow);
+        assert_eq!(marks[0].from, Some([0.7, 0.30]));
+        assert_eq!(marks[0].to, Some([0.2, 0.32]));
+        assert_eq!(
+            marks[0].description,
+            "drew an arrow from x 0.70, y 0.30 pointing to x 0.20, y 0.32"
+        );
+        assert_eq!(
+            shape_of(&figure(InkShape::Arrow, [0.1, 0.1], [0.1, 0.1])),
+            Shape::Arrow
+        );
+    }
+
+    #[test]
+    fn a_box_is_a_boxed_region_whatever_else_was_drawn_next_to_it() {
+        let mut box_stroke = figure(InkShape::Box, [0.6, 0.7], [0.2, 0.3]);
+        box_stroke.color = InkColor::Green;
+        let scribble = stroke(&[[0.3, 0.4], [0.35, 0.45], [0.3, 0.5]], 300);
+        let marks = marks_of(&[box_stroke, scribble]);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].shape, Shape::Box);
+        assert_eq!(marks[0].box_norm, [0.2, 0.3, 0.6, 0.7]);
+        assert_eq!(marks[0].color, InkColor::Green);
+        assert_eq!(
+            marks[0].description,
+            "boxed region x 0.20–0.60, y 0.30–0.70 (2 strokes) in green"
+        );
+    }
+
+    #[test]
+    fn red_ink_is_not_named_and_other_colours_are() {
+        let mut dash = stroke(&[[0.1, 0.5], [0.8, 0.5]], 0);
+        assert_eq!(
+            marks_of(&[dash.clone()])[0].description,
+            "underlined x 0.10–0.80 at y 0.50"
+        );
+        dash.color = InkColor::Blue;
+        let mark = &marks_of(&[dash])[0];
+        assert_eq!(mark.color, InkColor::Blue);
+        assert_eq!(mark.description, "underlined x 0.10–0.80 at y 0.50 in blue");
+    }
+
+    #[test]
+    fn an_arrow_is_a_shaft_and_two_head_strokes_at_its_end() {
+        let (a, b) = ([100.0, 100.0], [300.0, 100.0]);
+        let pieces = figure_segments(InkShape::Arrow, a, b, 5.0);
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[0], (a, b));
+        // Both head strokes start at the tip, reach back toward the tail by the same amount
+        // (four widths) and to either side of the shaft.
+        for (from, to) in &pieces[1..] {
+            assert_eq!(*from, b);
+            assert!((distance(*from, *to) - 20.0).abs() < 0.01);
+            assert!(to[0] < b[0] && (to[1] - 100.0).abs() > 5.0);
+        }
+        assert!((pieces[1].1[1] - 100.0) * (pieces[2].1[1] - 100.0) < 0.0);
+        // A short arrow's head takes half of it at most; no length at all draws nothing.
+        let short = figure_segments(InkShape::Arrow, a, [110.0, 100.0], 5.0);
+        assert!((distance(short[1].0, short[1].1) - 5.0).abs() < 0.01);
+        assert!(figure_segments(InkShape::Arrow, a, a, 5.0).is_empty());
+    }
+
+    #[test]
+    fn a_box_is_four_sides_from_either_pair_of_corners() {
+        let sides = figure_segments(InkShape::Box, [300.0, 200.0], [100.0, 50.0], 5.0);
+        assert_eq!(sides.len(), 4);
+        for (i, (_, to)) in sides.iter().enumerate() {
+            assert_eq!(*to, sides[(i + 1) % 4].0, "the sides meet");
+        }
+        let corners: Vec<_> = sides.iter().map(|s| s.0).collect();
+        for corner in [[100.0, 50.0], [300.0, 50.0], [300.0, 200.0], [100.0, 200.0]] {
+            assert!(corners.contains(&corner), "{corner:?}");
         }
     }
 
@@ -1466,6 +1610,7 @@ mod tests {
             pin: None,
             on: None,
             description: "flagged this moment".into(),
+            color: Default::default(),
             frame: None,
         });
         phone.keyframes.push(Keyframe {

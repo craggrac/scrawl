@@ -45,6 +45,8 @@ struct ExportPlan: Decodable {
     var snaps: [Snap]
     var fadeAt: Double
     var fadeMs: Double
+    /// `r, g, b` in 0...1; absent means red.
+    var color: [Double]?
   }
   struct Snap: Decodable {
     var t: Double
@@ -128,7 +130,8 @@ enum ExportInk {
         i += 2
       }
       ctx.closePath()
-      ctx.setFillColor(CGColor(red: red.r, green: red.g, blue: red.b, alpha: alpha))
+      let rgb = (stroke.color?.count == 3 ? stroke.color : nil) ?? [red.r, red.g, red.b]
+      ctx.setFillColor(CGColor(red: rgb[0], green: rgb[1], blue: rgb[2], alpha: alpha))
       ctx.fillPath()
     }
 
