@@ -1,6 +1,5 @@
-//! What macOS has and Linux doesn't yet: the Metal ink overlay (phase 5), the iPhone mirror and
-//! the native capsule. Each is an empty enum: it can't be made, `open`/`start` say why, and the
-//! code holding one is never reached.
+//! What macOS has and Linux doesn't: the iPhone mirror and the native capsule. Each is an empty
+//! enum: it can't be made, `start` says why, and the code holding one is never reached.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -10,30 +9,6 @@ use anyhow::{Result, bail};
 use super::SharedCaptureTelemetry;
 use crate::helper::PhoneDevice;
 use crate::phone::PhoneRecording;
-
-/// The ink and laser overlay.
-pub enum MetalLaserOverlay {}
-
-impl MetalLaserOverlay {
-    pub fn open(
-        _telemetry: Arc<SharedCaptureTelemetry>,
-        _on: Option<[f64; 4]>,
-    ) -> Result<Self, String> {
-        Err("the ink overlay isn't available on Linux yet".into())
-    }
-
-    pub fn window_number(&self) -> u32 {
-        match *self {}
-    }
-
-    pub fn screen(&self) -> [f64; 4] {
-        match *self {}
-    }
-
-    pub fn move_to(&mut self, _rect: [f64; 4]) -> bool {
-        match *self {}
-    }
-}
 
 /// The cabled iPhone's mirror window and recording.
 pub enum PhoneSession {}

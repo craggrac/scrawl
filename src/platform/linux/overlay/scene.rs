@@ -43,6 +43,7 @@ pub struct Scene {
 }
 
 impl Scene {
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty() && self.pins.is_empty() && self.tip.is_none()
     }
@@ -66,6 +67,15 @@ pub fn finished_alpha(age_ms: u64) -> Option<f32> {
         let t = ((age_ms - HOLD_MS) as f32 / FADE_MS as f32).clamp(0.0, 1.0);
         Some((1.0 - t) * (1.0 - t))
     }
+}
+
+/// Whether anything shown can still change with time alone: ink being drawn, or finished ink
+/// that is holding or fading. The overlay then looks every frame; otherwise only when woken.
+pub fn animating(strokes: &[Stroke], live: Option<&Stroke>, now_ms: u64) -> bool {
+    live.is_some_and(|s| !s.laser && s.pin.is_none())
+        || strokes.iter().any(|s| {
+            s.pin.is_none() && !s.laser && finished_alpha(now_ms.saturating_sub(s.t1)).is_some()
+        })
 }
 
 /// The scene at `now_ms` (the capture clock) for `strokes` (finished, oldest first) and the
@@ -242,6 +252,27 @@ mod tests {
         };
         let scene = build(&[laser.clone()], Some(&laser), 1_000, TARGET, None);
         assert!(scene.is_empty());
+    }
+
+    #[test]
+    fn only_ink_in_its_hold_or_fade_or_being_drawn_keeps_the_overlay_looking() {
+        let ink = stroke(1_000, &LINE);
+        let end = ink.t1;
+        let pin = Stroke {
+            pin: Some(1),
+            ..stroke(1_000, &[[0.5, 0.5]])
+        };
+        assert!(!animating(&[], None, 5_000));
+        assert!(animating(&[], Some(&ink), 5_000));
+        assert!(animating(std::slice::from_ref(&ink), None, end + 1_299));
+        assert!(!animating(std::slice::from_ref(&ink), None, end + 1_300));
+        // A pin never fades, so it needs no frames.
+        assert!(!animating(&[pin], None, 1_100));
+        let laser = Stroke {
+            laser: true,
+            ..ink
+        };
+        assert!(!animating(&[laser.clone()], Some(&laser), end));
     }
 
     #[test]

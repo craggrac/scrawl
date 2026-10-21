@@ -18,7 +18,8 @@ pub use self::session::{
     ScreenCaptureSession, discard_screen_session, recorders_running, start_screen_session,
 };
 pub use self::shortcut::{PressSource, ShortcutConfig, shortcut_from_key_and_mods};
-pub use self::standins::{MetalLaserOverlay, NativePill, PhoneSession, PillAction};
+pub use self::overlay::MetalLaserOverlay;
+pub use self::standins::{NativePill, PhoneSession, PillAction};
 pub use self::telemetry::SharedCaptureTelemetry;
 use crate::capture::scrawl_log;
 pub use crate::capture::{selectable_window_at, shortcut_parts};

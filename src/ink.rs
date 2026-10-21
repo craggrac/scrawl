@@ -92,9 +92,12 @@ mod tracker {
             Ok(fd)
         }
 
-        /// The overlay is going away.
-        pub fn detach(&self) {
-            *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        /// The overlay that attached `fd` is going away. A newer overlay's stays.
+        pub fn detach(&self, fd: &Arc<OwnedFd>) {
+            let mut current = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if current.as_ref().is_some_and(|c| Arc::ptr_eq(c, fd)) {
+                *current = None;
+            }
         }
 
         pub fn notify(&self) {
@@ -172,11 +175,13 @@ mod tracker {
         }
 
         /// ⇧ is held and drawing inside the target.
+        #[cfg(test)]
         pub fn shift_held(&self) -> bool {
             self.state.shift_held.load(Ordering::Acquire)
         }
 
         /// The pointer (global points) as of the last look while ⇧ was held.
+        #[cfg(test)]
         pub fn pointer(&self) -> [f32; 2] {
             *self
                 .state
@@ -759,10 +764,16 @@ mod tracker {
             let mut count = 0_u64;
             let read = unsafe { libc::read(fd.as_raw_fd(), (&raw mut count).cast(), 8) };
             assert_eq!((read, count), (8, 2));
-            state.wake.detach();
+            // An overlay that was replaced can't detach its successor.
+            let newer = state.wake.attach().unwrap();
+            state.wake.detach(&fd);
+            state.wake.notify();
+            let woken = unsafe { libc::read(newer.as_raw_fd(), (&raw mut count).cast(), 8) };
+            assert_eq!((woken, count), (8, 1));
+            state.wake.detach(&newer);
             state.wake.notify();
             // Nothing new once detached (the fd is still ours to poll, and empty).
-            let again = unsafe { libc::read(fd.as_raw_fd(), (&raw mut count).cast(), 8) };
+            let again = unsafe { libc::read(newer.as_raw_fd(), (&raw mut count).cast(), 8) };
             assert_eq!(again, -1);
         }
     }

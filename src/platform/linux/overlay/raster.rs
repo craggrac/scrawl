@@ -101,6 +101,7 @@ impl Raster {
     }
 
     /// One pixel's bytes: B, G, R, A.
+    #[cfg(test)]
     pub fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
         let at = (y as usize * self.width as usize + x as usize) * 4;
         [
