@@ -289,6 +289,30 @@ impl SettingsWindow {
             },
             false,
         ));
+        let target = crate::agent_send::Target::configured();
+        let other = target.other();
+        pane = pane
+            .child(group().child(row(
+                "Send button",
+                action_button("send-target", target.label(), false).on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        let value = serde_json::Value::from(other.name());
+                        this.act(
+                            Action::Set {
+                                key: "sendTarget".to_owned(),
+                                value,
+                            },
+                            window,
+                            cx,
+                        );
+                    },
+                )),
+            )))
+            .child(caption(
+                "Where the Send button in a capture's review window goes (click to switch). \
+                 Nothing is sent until you press it. T3 Code needs t3Webhook in config.json; see the README.",
+                false,
+            ));
         for shortcut in &self.view.shortcuts {
             pane = pane.child(self.recorder(shortcut, cx));
         }
