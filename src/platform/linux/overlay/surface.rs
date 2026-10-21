@@ -332,7 +332,7 @@ impl App {
             qh,
             surface,
             Layer::Overlay,
-            Some("scrawl-ink"),
+            Some(crate::linux::hypr::INK_NAMESPACE),
             Some(output),
         );
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);

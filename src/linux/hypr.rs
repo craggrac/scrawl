@@ -27,6 +27,8 @@ pub const REVIEW_CLASS: &str = "scrawl-review";
 /// The app id of the window that keeps `scrawl app` running: gpui quits on Linux when its
 /// last window closes, and the capsule closes between captures.
 pub const KEEP_ALIVE_CLASS: &str = "scrawl-keep-alive";
+/// The ink overlay's layer-shell namespace (`Overlay::new`'s `namespace`).
+pub const INK_NAMESPACE: &str = "scrawl-ink";
 /// Windows narrower or shorter than this (points) aren't offered by the picker.
 const MIN_WINDOW: i32 = 80;
 
@@ -142,6 +144,7 @@ pub fn install_window_rules(pill: [f32; 3], review: [f32; 2]) {
         picker_rule(),
         review_rule(review[0], review[1]),
         keep_alive_rule(),
+        ink_layer_rule(),
     ];
     for rule in &lua {
         let Err(error) = hypr_command(&format!("eval {rule}")) else {
@@ -167,6 +170,10 @@ fn install_legacy_window_rules(pill: [f32; 3], review: [f32; 2]) {
         if let Err(error) = hypr_command(&format!("keyword windowrulev2 {rule}")) {
             scrawl_log(format!("Hyprland rule {rule:?}: {error:#}"));
         }
+    }
+    let layer = legacy_ink_layer_rule();
+    if let Err(error) = hypr_command(&format!("keyword layerrule {layer}")) {
+        scrawl_log(format!("Hyprland layer rule {layer:?}: {error:#}"));
     }
 }
 
@@ -223,24 +230,47 @@ pub fn pill_under_picker(clients: &[Client]) -> bool {
     )
 }
 
+/// What `keep_pill_over_picker` does next.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PillStep {
+    /// No capsule, or it is already above the picker (a capsule that opens after the picker
+    /// does).
+    Done,
+    /// The capsule is under the picker.
+    Raise,
+    /// A capsule is up and the picker isn't yet.
+    Wait,
+}
+
+pub fn pill_step(clients: &[Client]) -> PillStep {
+    let mapped = |class: &str| clients.iter().any(|c| c.class == class && c.mapped);
+    if !mapped(PILL_CLASS) {
+        PillStep::Done
+    } else if pill_under_picker(clients) {
+        PillStep::Raise
+    } else if mapped(PICKER_CLASS) {
+        PillStep::Done
+    } else {
+        PillStep::Wait
+    }
+}
+
 /// The picker is opening: once it is mapped, a capsule that was already open (the Completed
-/// one, say) goes back above the picker's dim. A capsule that opens after the picker is
-/// above it already. Waits for them, so run it off the UI thread.
+/// one, say) goes back above the picker's dim. Returns at once when there is no capsule. Waits
+/// for the picker, so run it off the UI thread.
 pub fn keep_pill_over_picker() {
     let started = Instant::now();
     while started.elapsed() < Duration::from_millis(1_500) {
-        let clients = clients();
-        let mapped = |class: &str| clients.iter().any(|c| c.class == class && c.mapped);
-        if pill_under_picker(&clients) {
-            raise_window(PILL_CLASS);
-            return;
+        match pill_step(&clients()) {
+            PillStep::Done => return,
+            PillStep::Raise => {
+                raise_window(PILL_CLASS);
+                return;
+            }
+            PillStep::Wait => std::thread::sleep(Duration::from_millis(15)),
         }
-        // Both up, in the right order: nothing to do.
-        if mapped(PILL_CLASS) && mapped(PICKER_CLASS) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(15));
     }
+    scrawl_log("Hyprland: the picker never mapped; the capsule was left where it was");
 }
 
 /// The focused window, if any.
@@ -775,6 +805,19 @@ pub fn legacy_keep_alive_rules() -> Vec<String> {
         .into()
 }
 
+/// The ink overlay's layer maps without an animation: the first stroke would otherwise be
+/// drawn into a fading-in layer, and so would the video.
+pub fn ink_layer_rule() -> String {
+    format!(
+        "hl.layer_rule({{ match = {{ namespace = \"^({INK_NAMESPACE})$\" }}, no_anim = true }})"
+    )
+}
+
+/// `ink_layer_rule` for Hyprland before 0.53.
+pub fn legacy_ink_layer_rule() -> String {
+    format!("noanim, ^({INK_NAMESPACE})$")
+}
+
 /// `picker_rule` and `review_rule` for Hyprland before 0.53.
 pub fn legacy_window_rules(review_width: f32, review_height: f32) -> Vec<String> {
     let picker = [
@@ -1024,6 +1067,15 @@ mod tests {
     }
 
     #[test]
+    fn the_ink_layer_maps_without_an_animation() {
+        assert_eq!(
+            ink_layer_rule(),
+            r#"hl.layer_rule({ match = { namespace = "^(scrawl-ink)$" }, no_anim = true })"#
+        );
+        assert_eq!(legacy_ink_layer_rule(), "noanim, ^(scrawl-ink)$");
+    }
+
+    #[test]
     fn picker_covers_its_monitor_and_review_floats_centred() {
         assert_eq!(
             picker_rule(),
@@ -1092,5 +1144,27 @@ mod tests {
         assert!(!pill_under_picker(&[client("scrawl-pill", true), client("scrawl-picker", false)]));
         assert!(!pill_under_picker(&[client("scrawl-pill", false), client("scrawl-picker", true)]));
         assert!(!pill_under_picker(&[]));
+    }
+
+    #[test]
+    fn without_a_capsule_the_raise_thread_ends_at_once() {
+        // The picker not up yet is no reason to wait when there is nothing to raise.
+        assert_eq!(pill_step(&[]), PillStep::Done);
+        assert_eq!(pill_step(&[client("Helium", true)]), PillStep::Done);
+        assert_eq!(pill_step(&[client("scrawl-pill", false)]), PillStep::Done);
+        assert_eq!(pill_step(&[client("scrawl-picker", true)]), PillStep::Done);
+    }
+
+    #[test]
+    fn a_capsule_waits_for_the_picker_then_is_raised_or_left() {
+        assert_eq!(pill_step(&[client("scrawl-pill", true)]), PillStep::Wait);
+        assert_eq!(
+            pill_step(&[client("scrawl-pill", true), client("scrawl-picker", true)]),
+            PillStep::Raise
+        );
+        assert_eq!(
+            pill_step(&[client("scrawl-picker", true), client("scrawl-pill", true)]),
+            PillStep::Done
+        );
     }
 }
