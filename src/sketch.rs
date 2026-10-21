@@ -812,7 +812,7 @@ pub fn smooth_laser_points(points: &[([f32; 2], f32)]) -> Vec<([f32; 2], f32)> {
 
 /// Smooths a persistent ink stroke into `(point, pressure_scale)` samples using
 /// tldraw's streamline filter + midpoint quadratic Bezier curves + simulated velocity pressure.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub fn smooth_ink_points(points: &[[f32; 2]]) -> Vec<([f32; 2], f32)> {
     if points.is_empty() {
         return Vec::new();

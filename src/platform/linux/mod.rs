@@ -4,6 +4,7 @@
 //! can't be built, so the paths using them are never taken.
 
 pub mod chrome;
+pub mod overlay;
 pub mod picker_dim;
 mod session;
 mod shortcut;
