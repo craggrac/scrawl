@@ -26,11 +26,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
-use super::{control, hypr, media, record, toggle};
+use super::window_ring::WindowRing;
+use super::{control, hypr, media, record, redact, toggle};
 use crate::audio::{self, AudioRecorder, RecordedAudio};
 use crate::capture::{ScreenRecording, scrawl_log};
 use crate::handoff::{self, Config};
 use crate::model::TargetInfo;
+use crate::windows::ActivityLog;
 
 /// What the window is when `replaySeconds` is absent, and its bounds.
 const DEFAULT_SECONDS: u64 = 30;
@@ -214,6 +216,8 @@ struct Run {
     audio_retry: Instant,
     /// The end of what `wf-recorder` said, for the log if it quits.
     said: Arc<Mutex<String>>,
+    /// Which windows were on screen over the window, for the redaction of a saved clip.
+    windows: WindowRing,
 }
 
 /// Counts a buffer's recorder as running, for `running`.
@@ -313,6 +317,7 @@ impl Run {
         Ok(Self {
             child,
             dir,
+            windows: WindowRing::start(target.frame),
             target,
             origin: SystemTime::now(),
             audio: AudioRecorder::start().ok(),
@@ -341,6 +346,7 @@ impl Run {
                 let _ = std::fs::remove_file(&segment.path);
             }
         }
+        self.windows.prune(SystemTime::now() - keep);
         if self.audio.as_ref().is_some_and(AudioRecorder::failed) {
             self.audio = None;
         }
@@ -356,10 +362,19 @@ impl Run {
     }
 
     /// Ends the buffer and cuts the last `seconds` of it into `bundle_dir`.
-    fn save(mut self, bundle_dir: &Path, seconds: u64) -> Result<Saved> {
+    fn save(self, bundle_dir: &Path, seconds: u64) -> Result<Saved> {
+        self.save_hiding(bundle_dir, seconds, &redact::Patterns::configured())
+    }
+
+    /// `save` with the window patterns the clip's redaction is for.
+    fn save_hiding(mut self, bundle_dir: &Path, seconds: u64, hide: &redact::Patterns) -> Result<Saved> {
         let saved_at = SystemTime::now();
         let start = window_start(self.origin, saved_at, Duration::from_secs(seconds));
         let window = saved_at.duration_since(start).unwrap_or_default();
+        // What was on screen, before anything is stopped or cut: a refusal (nothing to go by for
+        // the windows `redactApps` hides) costs the buffer, not the user's privacy. The finish
+        // hides the windows in the clip with it.
+        let windows = redact::replay_windows(self.windows.finish(start, saved_at), hide)?;
         // Before the recorder stops, so the microphone's end is the moment of the save.
         let heard = self
             .audio
@@ -400,6 +415,7 @@ impl Run {
                 video_offset_ms: 0,
             },
             audio,
+            activity: ActivityLog { windows, ..ActivityLog::default() },
         })
     }
 }
@@ -419,6 +435,8 @@ pub struct Saved {
     pub target: TargetInfo,
     pub recording: ScreenRecording,
     pub audio: Option<RecordedAudio>,
+    /// The windows on screen over the clip, on its clock (nothing else is logged for a replay).
+    pub activity: ActivityLog,
 }
 
 // MARK: The supervisor
@@ -648,7 +666,7 @@ fn save_bundle() -> Result<PathBuf> {
                 "Saved from the replay buffer: the {seconds} seconds before the shortcut. \
                  Nothing was inked or pinned, and no clicks or keys were logged."
             )),
-            crate::windows::ActivityLog::default(),
+            saved.activity,
         )?;
         Ok(dir)
     })();
@@ -937,6 +955,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn entry(app: &str, bounds: [i32; 4]) -> crate::windows::WindowEntry {
+        crate::windows::WindowEntry {
+            id: 1,
+            app: app.into(),
+            bundle_id: None,
+            regular: true,
+            title: String::new(),
+            bounds,
+            layer: 0,
+            frontmost: false,
+        }
+    }
+
+    /// A buffer whose recorder is `sleep` and whose window looks `sees` returns.
+    fn run_with(sees: impl Fn() -> Option<Vec<crate::windows::WindowEntry>> + Send + Sync + 'static) -> Run {
+        let dir = std::env::temp_dir().join(format!("scrawl-replay-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let child = Command::new("sleep").arg("60").stderr(Stdio::piped()).spawn().unwrap();
+        Run {
+            child,
+            dir,
+            target: crate::model::TargetInfo {
+                mode: crate::model::CaptureMode::Display,
+                app: None,
+                bundle_id: None,
+                window_title: None,
+                window_id: None,
+                display_id: 0,
+                frame: crate::model::TargetFrame { x: 0.0, y: 0.0, width: 640.0, height: 360.0, scale: 1.0 },
+            },
+            origin: SystemTime::now() - Duration::from_secs(20),
+            audio: None,
+            audio_retry: Instant::now() + Duration::from_secs(3_600),
+            said: Arc::default(),
+            windows: WindowRing::start_with(sees, Duration::from_millis(20)),
+        }
+    }
+
+    #[test]
+    fn a_save_with_no_window_log_is_refused_when_windows_are_to_be_hidden_and_the_buffer_ends() {
+        let run = run_with(|| None);
+        std::thread::sleep(Duration::from_millis(80));
+        let child_dir = run.dir.clone();
+        let bundle = std::env::temp_dir().join(format!("scrawl-replay-refused-{}", std::process::id()));
+        std::fs::create_dir_all(&bundle).unwrap();
+        let hide = redact::Patterns::parse(&["pass".to_owned()]);
+        let error = run.save_hiding(&bundle, 10, &hide).err().unwrap().to_string();
+        assert!(error.contains("window log is unavailable"), "{error}");
+        assert!(!bundle.join("recording.mp4").exists(), "no clip was cut");
+        assert!(!child_dir.exists(), "dropping the buffer removes its ring");
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
     /// The ring end to end with `ffmpeg -re` standing in for `wf-recorder` (it writes the same
     /// real-time segments and, like it, ends cleanly on SIGINT) and no microphone: ticks drop
     /// old segments, a save cuts the window out. Run by hand (`--ignored`): it takes 11 s.
@@ -965,6 +1036,10 @@ mod tests {
             audio: None,
             audio_retry: Instant::now() + Duration::from_secs(3_600),
             said: Arc::default(),
+            windows: WindowRing::start_with(
+                || Some(vec![entry("pass", [0, 0, 100, 100])]),
+                Duration::from_millis(100),
+            ),
         };
         // Only the margin is kept (6 s): by the end the first segments (closed at 2 and 4 s) are gone.
         let mut most = 0;
@@ -980,7 +1055,10 @@ mod tests {
         let bundle = std::env::temp_dir().join(format!("scrawl-replay-bundle-{}", std::process::id()));
         std::fs::create_dir_all(&bundle).unwrap();
         let began = Instant::now();
-        let saved = run.save(&bundle, 2).unwrap();
+        let saved = run.save_hiding(&bundle, 2, &redact::Patterns::parse(&["pass".to_owned()])).unwrap();
+        // The windows the ring saw come with the clip, and the finish redacts them from it.
+        assert_eq!(saved.activity.windows.len(), 1);
+        assert_eq!(saved.activity.windows[0].windows[0].app, "pass");
         eprintln!("save took {} ms", began.elapsed().as_millis());
         assert!((1_900..=2_100).contains(&saved.recording.duration_ms));
         let video = saved.recording.video.unwrap();

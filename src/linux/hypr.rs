@@ -560,6 +560,11 @@ pub fn sample_windows(frame: TargetFrame) -> Option<Vec<WindowEntry>> {
     Some(capture_entries(&clients, monitor, frame))
 }
 
+/// `sample_windows` for `frame`, as a closure a thread can own.
+pub fn sample_windows_for(frame: TargetFrame) -> impl Fn() -> Option<Vec<WindowEntry>> + Send + Sync + 'static {
+    move || sample_windows(frame)
+}
+
 /// Whether `frame` is a whole monitor (as `WindowLogger` is meant for), when that can be told.
 fn is_display(frame: TargetFrame) -> bool {
     hypr_json::<Vec<Monitor>>("monitors").map_or(true, |monitors| {

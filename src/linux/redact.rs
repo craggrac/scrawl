@@ -15,7 +15,8 @@
 //! or an area capture (which wf-recorder records as a screen rectangle) logs the same windows
 //! with their bounds moved to the capture's corner and is planned the same way, so a matched
 //! window that overlaps it is cut at its edge. A window capture of a matching window is
-//! filled black whole.
+//! filled black whole. A replay-buffer save has a rolling log (`window_ring`) and, when that has
+//! holes, is hidden conservatively or refused (`replay_windows`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,7 +27,8 @@ use anyhow::{Context, Result, ensure};
 use crate::linux::media;
 use crate::model::{CaptureMode, TargetFrame, TargetInfo};
 use crate::capture::scrawl_log;
-use crate::windows::WindowSnapshot;
+use crate::linux::window_ring::Slice;
+use crate::windows::{WindowEntry, WindowSnapshot};
 
 /// What `redactApps` holds when the config doesn't say: the password managers. A password
 /// manager in a recording that goes to an agent is a leak with nothing to gain from showing it.
@@ -565,6 +567,48 @@ fn blur_video(video: &Path, blurs: &[Blur]) -> Result<()> {
     std::fs::rename(&joined, video).context("Could not replace the recording")
 }
 
+// MARK: A replay's window log
+
+/// The window log a replay save gives the finish, from what the buffer's rolling log holds for
+/// the clip. The finish then redacts it like any capture's. With nothing to hide the log is
+/// handed over as it is. If the log has holes (a failed look: the clip's start, end or
+/// middle was not watched) a window that matched could have been on screen unseen, so the clip
+/// is hidden conservatively: every matched window seen anywhere in the log, or by the look at
+/// the moment of the save, is taken to be there for the whole clip, in the one box that
+/// holds everywhere it was. If the log has nothing at all (Hyprland could not be asked for the
+/// whole stretch) there is nothing to be conservative about, and the save is refused rather
+/// than risk a clip a password manager is in.
+pub fn replay_windows(slice: Slice, patterns: &Patterns) -> Result<Vec<WindowSnapshot>> {
+    if patterns.is_empty() || slice.complete {
+        return Ok(slice.snapshots);
+    }
+    ensure!(
+        !slice.snapshots.is_empty(),
+        "the window log is unavailable (Hyprland did not answer), so Scrawl can't tell whether a          window from `redactApps` was on screen; set `redactApps` to [] to save without hiding windows"
+    );
+    scrawl_log(
+        "Replay buffer: the window log has gaps; hiding every matching window it saw for the whole clip",
+    );
+    let mut held: Vec<WindowEntry> = Vec::new();
+    for window in slice
+        .snapshots
+        .iter()
+        .flat_map(|s| &s.windows)
+        .filter(|w| patterns.matches(&w.app, &w.title))
+    {
+        match held.iter_mut().find(|h| h.id == window.id) {
+            Some(known) => {
+                let [x0, y0] = [known.bounds[0].min(window.bounds[0]), known.bounds[1].min(window.bounds[1])];
+                let x1 = (known.bounds[0] + known.bounds[2]).max(window.bounds[0] + window.bounds[2]);
+                let y1 = (known.bounds[1] + known.bounds[3]).max(window.bounds[1] + window.bounds[3]);
+                known.bounds = [x0, y0, x1 - x0, y1 - y0];
+            }
+            None => held.push(window.clone()),
+        }
+    }
+    Ok(vec![WindowSnapshot { t: 0, windows: held }])
+}
+
 /// What `finalize_capture_bundle` needs of the redaction: the places to hide.
 pub struct Redaction {
     blurs: Vec<Blur>,
@@ -638,7 +682,6 @@ impl Redaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::windows::WindowEntry;
 
     fn patterns(entries: &[&str]) -> Patterns {
         Patterns::parse(&entries.iter().map(|e| (*e).to_owned()).collect::<Vec<_>>())
@@ -940,6 +983,47 @@ mod tests {
         assert!(!wants_window_log(&target_at(CaptureMode::Device, None, None)));
     }
 
+    // MARK: A replay's log
+
+    fn slice(complete: bool, snapshots: Vec<WindowSnapshot>) -> Slice {
+        Slice { snapshots, complete }
+    }
+
+    #[test]
+    fn a_complete_replay_log_goes_to_the_bundle_as_it_is() {
+        let log = vec![snapshot(0, vec![hidden("pass", 1, [0, 0, 10, 10])]), snapshot(4_000, vec![])];
+        assert_eq!(replay_windows(slice(true, log.clone()), &pass()).unwrap(), log);
+        // With nothing to hide nothing is checked, even a log with nothing in it.
+        assert!(replay_windows(slice(false, Vec::new()), &patterns(&[])).unwrap().is_empty());
+        assert_eq!(replay_windows(slice(false, log.clone()), &patterns(&[])).unwrap(), log);
+    }
+
+    #[test]
+    fn a_replay_with_no_window_log_at_all_is_refused_when_something_is_to_be_hidden() {
+        let error = replay_windows(slice(false, Vec::new()), &pass()).unwrap_err().to_string();
+        assert!(error.contains("window log is unavailable") && error.contains("redactApps"), "{error}");
+    }
+
+    #[test]
+    fn a_log_with_holes_hides_every_matching_window_it_saw_for_the_whole_clip() {
+        let log = vec![
+            snapshot(0, vec![window(2, "kitty", "", [0, 0, 400, 400])]),
+            snapshot(5_000, vec![hidden("pass", 1, [100, 100, 200, 100]), window(2, "kitty", "", [0, 0, 400, 400])]),
+            snapshot(9_000, vec![hidden("pass", 1, [300, 50, 200, 100])]),
+        ];
+        let held = replay_windows(slice(false, log), &pass()).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].t, 0);
+        assert_eq!(held[0].windows.len(), 1, "only the matching window, once");
+        assert_eq!(held[0].windows[0].bounds, [100, 50, 400, 150], "one box over where it was");
+        let blurs = plan(&held, &pass(), frame(), 0);
+        assert_eq!(blurs.len(), 1);
+        assert_eq!((blurs[0].start_ms, blurs[0].end_ms), (0, u64::MAX));
+        // Nothing matching ever seen: nothing to hide, and the save goes ahead.
+        let none = vec![snapshot(0, vec![window(2, "kitty", "", [0, 0, 400, 400])])];
+        assert!(replay_windows(slice(false, none), &pass()).unwrap()[0].windows.is_empty());
+    }
+
     // MARK: With ffmpeg
 
     const W: usize = 640;
@@ -1044,6 +1128,73 @@ mod tests {
         assert_eq!(media::probe(&video).unwrap().audio_tracks, 1);
         assert_eq!(packets(&video).unwrap().0, packets(&original).unwrap().0);
         assert!(!video.with_extension("redacting.mp4").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A replay save end to end, with a stand-in clip: the ring saw a matching window open at
+    /// 3 s and close at 6 s of the last 12 s, and what it hands over is what the finish hides.
+    #[test]
+    fn a_replays_rolling_log_hides_its_window_in_the_clip() {
+        use crate::linux::window_ring::RollingLog;
+        let (dir, video) = movie("replay", false);
+        let original = dir.join("original.mp4");
+        std::fs::copy(&video, &original).unwrap();
+        let start = std::time::SystemTime::now() - Duration::from_secs(12);
+        let mut ring = RollingLog::default();
+        for second in 0..=12_u64 {
+            let seen = if (3..6).contains(&second) {
+                vec![hidden("pass", 1, [160, 90, 200, 120])]
+            } else {
+                vec![window(2, "kitty", "", [0, 0, 100, 100])]
+            };
+            ring.record(start + Duration::from_secs(second), Some(seen));
+        }
+        let end = start + Duration::from_secs(12);
+        let slice = ring.slice(start, end);
+        assert!(slice.complete);
+        let mut windows = replay_windows(slice, &pass()).unwrap();
+        let mut shown = target_at(CaptureMode::Display, None, None);
+        shown.frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
+        let redaction = Redaction::prepare_with(&pass(), &mut windows, &mut shown, 0);
+        assert_eq!(windows[2].windows[0].title, REDACTED, "the saved log carries no title either");
+        assert!(redaction.apply(Some(&video)).is_some());
+        assert!(blocky(&gray(&video, 4.5167), 160, 170, 4));
+        assert!(mean_difference(&gray(&original, 4.5167), &gray(&video, 4.5167), 168..352, 98..202) > 30.0);
+        // Well before it opened and well after it closed the clip is as it was (its pieces are copied).
+        for t in [0.0167, 0.9167, 7.5167, 11.5167] {
+            assert_eq!(gray(&video, t), gray(&original, t), "{t}");
+        }
+        assert_eq!(packets(&video).unwrap().0, packets(&original).unwrap().0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A window capture of a matching window (an area the size of the video).
+    #[test]
+    fn a_window_capture_of_a_matching_window_comes_out_black_and_an_overlapping_one_is_cut_in() {
+        let (dir, video) = movie("window", false);
+        let mut shown = target_at(CaptureMode::Window, Some("org.pass.Manager"), Some("Vault"));
+        shown.frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
+        let redaction = Redaction::prepare_with(&pass(), &mut Vec::new(), &mut shown, 0);
+        assert!(redaction.apply(Some(&video)).is_some());
+        for t in [0.2, 6.0, 11.8] {
+            let frame = gray(&video, t);
+            assert!(frame.iter().all(|&v| v < 24), "{t}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // Another window in front of an area: only its part inside the area is hidden.
+        let (dir, video) = movie("area", false);
+        let original = dir.join("original.mp4");
+        std::fs::copy(&video, &original).unwrap();
+        let mut shown = target_at(CaptureMode::Region, Some("kitty"), None);
+        shown.frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
+        // In the area's own coordinates: hangs off the left edge and the top.
+        let mut log = vec![snapshot(0, vec![hidden("pass", 1, [-100, -60, 300, 200])])];
+        let redaction = Redaction::prepare_with(&pass(), &mut log, &mut shown, 0);
+        assert!(redaction.apply(Some(&video)).is_some());
+        let (before, after) = (gray(&original, 5.5167), gray(&video, 5.5167));
+        assert!(mean_difference(&before, &after, 0..180, 0..120) > 20.0, "the overlap is hidden");
+        assert!(mean_difference(&before, &after, 300..620, 200..350) < 6.0, "the rest stays");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

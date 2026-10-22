@@ -13,6 +13,7 @@ pub mod record;
 pub mod redact;
 pub mod replay;
 pub mod toggle;
+pub mod window_ring;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

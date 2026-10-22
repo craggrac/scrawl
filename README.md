@@ -98,8 +98,13 @@ Off by default. With **Replay buffer** on in Settings, Recording (or `"replayBuf
 keeps the last seconds of the focused output and the microphone. `scrawl replay`, the control
 socket's `replay` and the tray's **Save Last 30 s** save them as a normal bundle: the video and
 audio of the window, then the usual finish (Parakeet, keyframes, contact sheet, summary, clipboard,
-a notification). There is no ink, pin, click or window log for the past, and the summary's note
-says so. Bind it next to the recording shortcut (not done for you):
+a notification). There is no ink, pin or click log for the past, and the summary's note
+says so. The windows on screen are logged while the buffer runs (one look a second, two Hyprland
+socket requests, about a tenth of a millisecond; kept only for the window) and the clip's slice goes to
+the finish, so `redactApps` blurs a password manager visible in the last seconds
+([Hiding windows](#hiding-windows)). If that log has holes the whole clip is blurred where a matching
+window was seen, and if Hyprland could not be asked at all the save is refused with a notification
+(set `redactApps` to `[]` to save anyway). Bind it next to the recording shortcut (not done for you):
 
 ```lua
 hl.bind("ALT + SHIFT + R", hl.dsp.exec_cmd("scrawl replay"))
@@ -249,7 +254,8 @@ the capture, so a password manager open on the side never reaches the agent or t
   black whole, for its entire length. The window log costs one look a second plus a focus check ten
   times a second (the same as a display capture's, without the cursor); with `redactApps: []` it isn't
   started. A matched window behind the captured window, in the rectangle, is blurred too (the log does
-  not know what is covered). A replay-buffer save has no window log yet.
+  not know what is covered). A replay-buffer save is redacted from the buffer's own rolling log, see
+  [Replay buffer](#replay-buffer-save-what-just-happened).
 - **What it does not do.** The narration isn't redacted. Anything is recorded
   unblurred by `wf-recorder` until the capture finishes, so a capture that is cancelled or crashes
   leaves its `recording.mp4` as it was. If Hyprland can't be asked for the window list during a
