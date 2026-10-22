@@ -72,6 +72,9 @@ pub struct CursorSample(pub u64, pub f32, pub f32);
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ActivityLog {
     pub windows: Vec<WindowSnapshot>,
+    /// Linux: a stretch of the recording went unwatched (a look at the windows failed for longer
+    /// than a missed look or two), so `windows` may be missing a window that was there.
+    pub window_gaps: bool,
     pub cursor: Vec<CursorSample>,
     /// Calls to the window list and the time they took, for the log line at the end.
     pub snapshot_calls: u32,

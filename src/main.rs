@@ -844,14 +844,27 @@ pub fn finalize_capture_bundle(
     // Linux: the windows `redactApps` names lose their titles here and are blurred in the video
     // below, before anything is decoded from it.
     #[cfg(target_os = "linux")]
-    let (target, activity, redaction) = {
+    let (target, activity, redaction, note) = {
         let (mut target, mut activity) = (target, activity);
         let redaction = crate::linux::redact::Redaction::prepare(
             &mut activity.windows,
             &mut target,
             video_offset_ms,
+            activity.window_gaps,
         );
-        (target, activity, redaction)
+        // With no window log the picture was given up: the summary and a notification say so.
+        let note = match redaction.notice() {
+            Some(notice) => {
+                #[cfg(not(test))]
+                crate::linux::notify(notice);
+                Some(match note {
+                    Some(note) if !note.trim().is_empty() => format!("{notice} {note}"),
+                    _ => notice.to_owned(),
+                })
+            }
+            None => note,
+        };
+        (target, activity, redaction, note)
     };
     #[cfg(target_os = "linux")]
     let mut redact_ms = None;

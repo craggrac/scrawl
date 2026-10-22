@@ -256,11 +256,19 @@ the capture, so a password manager open on the side never reaches the agent or t
   started. A matched window behind the captured window, in the rectangle, is blurred too (the log does
   not know what is covered). A replay-buffer save is redacted from the buffer's own rolling log, see
   [Replay buffer](#replay-buffer-save-what-just-happened).
+- **When the window log fails.** The redaction does not trust a log it can't have. With patterns in
+  effect (any non-empty `redactApps`, the default included) and no look at the windows at all in a
+  recording, window or area capture (Hyprland never answered), the whole picture is filled black for the
+  whole recording instead of being published unblurred, `summary.md` says so in its `Note:` line, and a
+  notification does too. Narration, transcript, marks and events are kept (refusing or deleting would
+  throw those away, and they carry no pixels). If the log has holes (a stretch of more than 3 s
+  without a good look), every matching window it saw anywhere is blurred for the whole recording, in one
+  box over everywhere it was, as a replay save does. `redactApps: []` stays off: no log, no cost.
+  Windows that overhang a capture from a neighbouring monitor, and captures that cross monitors, are
+  covered (the windows of every monitor are collected and placed in the capture's coordinates).
 - **What it does not do.** The narration isn't redacted. Anything is recorded
   unblurred by `wf-recorder` until the capture finishes, so a capture that is cancelled or crashes
-  leaves its `recording.mp4` as it was. If Hyprland can't be asked for the window list during a
-  recording or an area capture, nothing is found to hide (the log line `Window log: 0 snapshots`
-  says so); only a replay save is refused in that case. The browser context (`devContext`) is not
+  leaves its `recording.mp4` as it was. The browser context (`devContext`) is not
   filtered by these patterns. macOS captures are untouched.
 
 ### Browser and project context

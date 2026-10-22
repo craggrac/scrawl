@@ -174,3 +174,47 @@ Closes the two limits listed above ("Window and region captures are not redacted
   `redact` (area/window planning in capture coordinates, device none, own-window whole-frame blur
   and the region exception, with ffmpeg: whole-frame black on a window capture, a cut-in overlap in
   an area, the other regions untouched).
+
+## Security fixes (automated review: three fail-open paths, plus the replay ring)
+
+Supersedes the "Not changed" bullet of the follow-up above (an empty log no longer publishes).
+
+1. **Multi-monitor coverage** (`hypr::capture_entries`, `sample_windows`). A capture is no longer
+   assigned to one monitor (`monitor_for`, gone). The windows of every monitor are collected, put in the
+   capture's coordinates and merged (dedup by window id); the capture must overlap at least one monitor
+   (`on_a_monitor`) or the look fails (`None`). Every monitor's windows, not only those of monitors whose
+   frame the capture overlaps, because a floating window homed on one monitor (by its centre) is drawn
+   wherever it reaches and can hang into a capture on its neighbour. Display captures are one monitor's
+   frame, so they could not span monitors (mirrored outputs aside); the `is_display` cursor check now
+   requires the same origin and size.
+2. **Coordinate mismatch.** The "monitor size equals frame size, return as is" shortcut is gone. The
+   translation `monitor - frame` is always applied (zero at a matching origin), and the filter to windows
+   that reach the capture runs for display captures too. Tests: an area 1920x1080 offset by 500, a
+   display capture of the second monitor, a capture straddling the border, a neighbour's window hanging in.
+3. **Empty or untrustworthy window log** (`redact::Redaction::prepare`, `hypr::Coverage`).
+   - Patterns non-empty and the log has no snapshot at all (recording, window or area capture; the
+     default list counts): the whole picture is filled solid black for the whole recording through the
+     same rewrite path (so a failure still deletes the video), and `summary.md` gets the notice as its
+     `Note:` line (user's note follows it), plus a `notify-send` (not in tests). Chosen over refusing or
+     deleting like replay: replay can refuse because nothing has been produced yet and the buffer
+     is lost, here the user has just recorded narration, strokes and events that carry no pixels and
+     would be thrown away; a black picture with an explicit notice is the least information lost
+     without a leak. Cost: one full re-encode (about 40 CPU s per 15 s of 1080p, a rare path).
+   - `redactApps: []` is no redaction and no log, no cost (unchanged). A log that worked and saw no
+     window is a log. Phone captures are skipped; a window capture of a matching window is black as
+     before, without the notice.
+   - Gaps: the logger records a failed look as nothing, so `Coverage` notes when more than 3 s (the
+     ring's `MAX_GAP`) pass between good looks, before the first, or after the last until the stop;
+     `ActivityLog::window_gaps`. With gaps every matched window seen anywhere (`held_everywhere`, shared
+     with `replay_windows`) is blurred for the whole recording in the box that holds everywhere it was,
+     added to the plan; the log in `scrawl.json` is kept as it is (not replaced by the held box).
+     Seen nowhere means nothing to hide, as in replay.
+   - The race of a startup config change (`[]` at start, patterns at finish) is closed too: no log,
+     black picture.
+4. **Replay ring ordering** (`window_ring`, separate commit). The final look and the background look now
+   both happen and are stored under the log's lock; `record` drops a look older than the newest held;
+   `slice` includes looks stored after the end, as if at the end (a window that appeared just before the
+   save is blurred in the last interval). Tests: stale record, and a save racing a background look.
+
+Tests: `cargo test` 587 passed (hypr: 6 new, `Coverage`; redact: no-log blackout for every kind of capture,
+`[]` off, gaps, ffmpeg black video with audio and every frame kept; ring: 2 new).

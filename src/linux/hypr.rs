@@ -512,42 +512,43 @@ pub fn window_entries(clients: &[Client], monitor: &Monitor) -> Vec<WindowEntry>
         .collect()
 }
 
-/// The monitor a capture of `frame` is on: the one whose top-left corner is the capture's (a
-/// display capture), else the one holding the capture's centre (a window or an area).
-fn monitor_for(monitors: &[Monitor], frame: TargetFrame) -> Option<&Monitor> {
-    monitors
-        .iter()
-        .find(|m| f64::from(m.x) == frame.x && f64::from(m.y) == frame.y)
-        .or_else(|| {
-            let (cx, cy) = (frame.x + frame.width / 2.0, frame.y + frame.height / 2.0);
-            monitors.iter().find(|m| {
-                let area = monitor_frame(m);
-                (area.x..area.x + area.width).contains(&cx) && (area.y..area.y + area.height).contains(&cy)
-            })
-        })
+/// The area `frame` and `other` share, in points squared (0 when they only touch).
+fn overlap(frame: TargetFrame, other: TargetFrame) -> f64 {
+    let width = (frame.x + frame.width).min(other.x + other.width) - frame.x.max(other.x);
+    let height = (frame.y + frame.height).min(other.y + other.height) - frame.y.max(other.y);
+    if width > 0.0 && height > 0.0 { width * height } else { 0.0 }
 }
 
-/// The windows of `monitor` with their bounds from the top-left of `frame`, the capture. For a
-/// display capture that is `window_entries` as it is; for a window or an area the bounds move
-/// to the capture's corner (they may be negative, as `WindowEntry::bounds` allows) and the
-/// windows that don't reach it are left out.
-pub fn capture_entries(clients: &[Client], monitor: &Monitor, frame: TargetFrame) -> Vec<WindowEntry> {
-    let mut entries = window_entries(clients, monitor);
-    let shown = monitor_frame(monitor);
-    if (shown.width - frame.width).abs() < 1.0 && (shown.height - frame.height).abs() < 1.0 {
-        return entries;
-    }
-    let dx = (f64::from(monitor.x) - frame.x).round() as i32;
-    let dy = (f64::from(monitor.y) - frame.y).round() as i32;
+/// Whether a capture of `frame` is on at least one of `monitors`.
+fn on_a_monitor(monitors: &[Monitor], frame: TargetFrame) -> bool {
+    monitors.iter().any(|m| overlap(monitor_frame(m), frame) > 0.0)
+}
+
+/// The windows on screen for a capture of `frame`, with their bounds from the top-left of
+/// `frame` (they may be negative, as `WindowEntry::bounds` allows), the ones that don't reach it
+/// left out. Always translated, by zero when the capture starts at the monitor's corner: a
+/// display capture of the second monitor, or an area the size of a monitor but offset, is not
+/// the first monitor's picture.
+///
+/// A capture can cross monitors, so the windows of every monitor are collected and merged (the
+/// first monitor's first; a window found twice once). Not only those of the monitors the capture
+/// overlaps: a floating window belongs to the monitor holding its centre but is drawn wherever it
+/// reaches, so one of a neighbouring monitor can hang into the capture.
+pub fn capture_entries(clients: &[Client], monitors: &[Monitor], frame: TargetFrame) -> Vec<WindowEntry> {
     let (width, height) = (frame.width.round() as i32, frame.height.round() as i32);
-    for entry in &mut entries {
-        entry.bounds[0] += dx;
-        entry.bounds[1] += dy;
+    let mut entries: Vec<WindowEntry> = Vec::new();
+    for monitor in monitors {
+        let dx = (f64::from(monitor.x) - frame.x).round() as i32;
+        let dy = (f64::from(monitor.y) - frame.y).round() as i32;
+        for mut entry in window_entries(clients, monitor) {
+            entry.bounds[0] += dx;
+            entry.bounds[1] += dy;
+            let [x, y, w, h] = entry.bounds;
+            if x < width && y < height && x + w > 0 && y + h > 0 && !entries.iter().any(|e| e.id == entry.id) {
+                entries.push(entry);
+            }
+        }
     }
-    entries.retain(|e| {
-        let [x, y, w, h] = e.bounds;
-        x < width && y < height && x + w > 0 && y + h > 0
-    });
     entries
 }
 
@@ -556,8 +557,7 @@ pub fn capture_entries(clients: &[Client], monitor: &Monitor, frame: TargetFrame
 pub fn sample_windows(frame: TargetFrame) -> Option<Vec<WindowEntry>> {
     let monitors = hypr_json::<Vec<Monitor>>("monitors").ok()?;
     let clients = hypr_json::<Vec<Client>>("clients").ok()?;
-    let monitor = monitor_for(&monitors, frame)?;
-    Some(capture_entries(&clients, monitor, frame))
+    on_a_monitor(&monitors, frame).then(|| capture_entries(&clients, &monitors, frame))
 }
 
 /// `sample_windows` for `frame`, as a closure a thread can own.
@@ -568,11 +568,38 @@ pub fn sample_windows_for(frame: TargetFrame) -> impl Fn() -> Option<Vec<WindowE
 /// Whether `frame` is a whole monitor (as `WindowLogger` is meant for), when that can be told.
 fn is_display(frame: TargetFrame) -> bool {
     hypr_json::<Vec<Monitor>>("monitors").map_or(true, |monitors| {
-        monitor_for(&monitors, frame).is_some_and(|m| {
+        monitors.iter().any(|m| {
             let shown = monitor_frame(m);
-            (shown.width - frame.width).abs() < 1.0 && (shown.height - frame.height).abs() < 1.0
+            (shown.x - frame.x).abs() < 1.0
+                && (shown.y - frame.y).abs() < 1.0
+                && (shown.width - frame.width).abs() < 1.0
+                && (shown.height - frame.height).abs() < 1.0
         })
     })
+}
+
+/// The longest stretch without a good look that still counts as watched: a missed look or two
+/// (a slow socket, a busy compositor), not more. The same as the replay ring's.
+const MAX_UNWATCHED_MS: u64 = 3_000;
+
+/// Whether the looks at the windows covered a recording from its start to its end.
+#[derive(Debug, Default)]
+struct Coverage {
+    last_ok: u64,
+    gaps: bool,
+}
+
+impl Coverage {
+    /// A good look at `t` (ms from the start).
+    fn saw(&mut self, t: u64) {
+        self.gaps |= t.saturating_sub(self.last_ok) > MAX_UNWATCHED_MS;
+        self.last_ok = t;
+    }
+
+    /// Whether anything from the start to `end` went unwatched.
+    fn has_gaps(&self, end: u64) -> bool {
+        self.gaps || end.saturating_sub(self.last_ok) > MAX_UNWATCHED_MS
+    }
 }
 
 /// Logs the cursor every tick and the window list every second or when focus moves, like the
@@ -626,6 +653,7 @@ fn run(
     let mut last_snapshot: Option<Instant> = None;
     let mut last_front: Option<String> = None;
     let with_cursor = is_display(frame);
+    let mut coverage = Coverage::default();
     loop {
         let finishing = stopping.load(Ordering::Acquire);
         let t = started_at.elapsed().as_millis() as u64;
@@ -640,6 +668,7 @@ fn run(
         if due {
             let began = Instant::now();
             if let Some(entries) = sample_windows(frame) {
+                coverage.saw(t);
                 log.push_windows(t, entries);
             }
             log.snapshot_calls += 1;
@@ -648,6 +677,7 @@ fn run(
             last_front = front;
         }
         if finishing {
+            log.window_gaps = coverage.has_gaps(t);
             return log;
         }
         thread::park_timeout(TICK);
@@ -1042,43 +1072,100 @@ mod tests {
         TargetFrame { x, y, width, height, scale: 1.0 }
     }
 
+    fn seen(frame: TargetFrame) -> Vec<(String, [i32; 4])> {
+        capture_entries(&clients(), &monitors(), frame).into_iter().map(|e| (e.app, e.bounds)).collect()
+    }
+
     #[test]
     fn a_window_capture_logs_windows_from_its_own_corner_and_drops_those_it_does_not_reach() {
         // The capture of the kitty window: 600,300 700x400 on the first monitor.
-        let frame = frame_at(600.0, 300.0, 700.0, 400.0);
-        let monitors = monitors();
-        let monitor = monitor_for(&monitors, frame).unwrap();
-        assert_eq!(monitor.id, 0);
-        let entries = capture_entries(&clients(), monitor, frame);
-        let bounds: Vec<_> = entries.iter().map(|e| (e.app.as_str(), e.bounds)).collect();
-        assert_eq!(bounds, [("kitty", [0, 0, 700, 400]), ("com.t3tools.T3Code", [-590, -248, 1900, 1018])]);
+        let shown = seen(frame_at(600.0, 300.0, 700.0, 400.0));
+        let shown: Vec<_> = shown.iter().map(|(app, bounds)| (app.as_str(), *bounds)).collect();
+        assert_eq!(shown, [("kitty", [0, 0, 700, 400]), ("com.t3tools.T3Code", [-590, -248, 1900, 1018])]);
         // An area at the top left that the floating kitty doesn't reach.
-        let corner = frame_at(0.0, 0.0, 300.0, 200.0);
-        let apps: Vec<_> = capture_entries(&clients(), monitor, corner).into_iter().map(|e| e.app).collect();
+        let apps: Vec<_> = seen(frame_at(0.0, 0.0, 300.0, 200.0)).into_iter().map(|(app, _)| app).collect();
         assert_eq!(apps, ["com.t3tools.T3Code"]);
     }
 
     #[test]
-    fn an_area_on_the_second_monitor_is_found_by_its_centre() {
+    fn an_area_on_the_second_monitor_logs_that_monitors_windows() {
         let monitors = monitors();
-        // Straddling the two monitors, it belongs to the one holding its centre (1900).
-        let straddling = frame_at(1800.0, 20.0, 200.0, 100.0);
-        assert_eq!(monitor_for(&monitors, straddling).unwrap().id, 0);
-        let frame = frame_at(1925.0, 20.0, 400.0, 300.0);
-        let monitor = monitor_for(&monitors, frame).unwrap();
-        assert_eq!(monitor.id, 1);
-        let entries = capture_entries(&clients(), monitor, frame);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].bounds, [5, 20, 1000, 800]);
-        assert!(monitor_for(&monitors, frame_at(9_000.0, 0.0, 10.0, 10.0)).is_none());
+        assert_eq!(seen(frame_at(1925.0, 20.0, 400.0, 300.0)), [("Helium".to_owned(), [5, 20, 1000, 800])]);
+        assert!(on_a_monitor(&monitors, frame_at(1925.0, 20.0, 400.0, 300.0)));
+        assert!(!on_a_monitor(&monitors, frame_at(9_000.0, 0.0, 10.0, 10.0)));
+        // Touching a monitor's edge is not being on it.
+        assert!(!on_a_monitor(&monitors, frame_at(-100.0, 0.0, 100.0, 100.0)));
+    }
+
+    #[test]
+    fn a_capture_across_two_monitors_gets_the_windows_of_both() {
+        // Straddling the two monitors (the border is at 1920): the first monitor's browser and the
+        // second monitor's, each in the capture's coordinates, none twice.
+        let both = seen(frame_at(1800.0, 20.0, 400.0, 300.0));
+        assert_eq!(
+            both,
+            [
+                ("com.t3tools.T3Code".to_owned(), [-1790, 32, 1900, 1018]),
+                ("Helium".to_owned(), [130, 20, 1000, 800]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_floating_window_of_a_neighbouring_monitor_that_hangs_into_the_capture_is_found() {
+        // Homed on the first monitor but dragged over the border; the capture is on the second
+        // monitor alone and a window of the monitor it is on would never have led to it.
+        let mut all = clients();
+        all[1].at = [1800, 300];
+        let monitors = monitors();
+        let frame = frame_at(1920.0, 0.0, 600.0, 600.0);
+        let hanging: Vec<_> = capture_entries(&all, &monitors, frame)
+            .into_iter()
+            .filter(|e| e.app == "kitty")
+            .map(|e| e.bounds)
+            .collect();
+        assert_eq!(hanging, [[-120, 300, 700, 400]]);
+    }
+
+    #[test]
+    fn an_area_the_size_of_a_monitor_but_offset_is_translated() {
+        // 1920x1080 like the first monitor but starting at 500,0: the size alone says nothing.
+        let shown = seen(frame_at(500.0, 0.0, 1920.0, 1080.0));
+        let by_app = |app: &str| shown.iter().find(|(a, _)| a == app).map(|(_, b)| *b);
+        assert_eq!(by_app("com.t3tools.T3Code"), Some([-490, 52, 1900, 1018]));
+        assert_eq!(by_app("kitty"), Some([100, 300, 700, 400]));
+        assert_eq!(by_app("Helium"), Some([1430, 40, 1000, 800]));
+    }
+
+    #[test]
+    fn a_display_capture_of_the_second_monitor_is_in_its_own_coordinates() {
+        let monitors = monitors();
+        assert_eq!(seen(monitor_frame(&monitors[1])), [("Helium".to_owned(), [10, 40, 1000, 800])]);
     }
 
     #[test]
     fn a_display_capture_logs_what_it_always_did() {
         let monitors = monitors();
-        let frame = monitor_frame(&monitors[1]);
-        let monitor = monitor_for(&monitors, frame).unwrap();
-        assert_eq!(capture_entries(&clients(), monitor, frame), window_entries(&clients(), monitor));
+        let frame = monitor_frame(&monitors[0]);
+        assert_eq!(capture_entries(&clients(), &monitors, frame), window_entries(&clients(), &monitors[0]));
+    }
+
+    #[test]
+    fn a_log_with_a_long_stretch_unwatched_has_gaps() {
+        let mut coverage = Coverage::default();
+        for t in [0, 1_000, 2_000, 4_500] {
+            coverage.saw(t);
+        }
+        assert!(!coverage.has_gaps(6_000), "two missed looks are tolerated");
+        assert!(coverage.has_gaps(9_000), "nothing for the last 4.5 s");
+        coverage.saw(9_000);
+        assert!(coverage.has_gaps(9_000), "the hole stays");
+        // A log that never got a look is unwatched from the start, a late first look too.
+        assert!(Coverage::default().has_gaps(10_000));
+        assert!(!Coverage::default().has_gaps(1_000));
+        let mut late = Coverage::default();
+        late.saw(5_000);
+        assert!(late.has_gaps(5_000));
     }
 
     #[test]

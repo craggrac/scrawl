@@ -584,14 +584,19 @@ pub fn replay_windows(slice: Slice, patterns: &Patterns) -> Result<Vec<WindowSna
     }
     ensure!(
         !slice.snapshots.is_empty(),
-        "the window log is unavailable (Hyprland did not answer), so Scrawl can't tell whether a          window from `redactApps` was on screen; set `redactApps` to [] to save without hiding windows"
+        "the window log is unavailable (Hyprland did not answer), so Scrawl can't tell whether a window from `redactApps` was on screen; set `redactApps` to [] to save without hiding windows"
     );
     scrawl_log(
         "Replay buffer: the window log has gaps; hiding every matching window it saw for the whole clip",
     );
+    Ok(vec![WindowSnapshot { t: 0, windows: held_everywhere(&slice.snapshots, patterns) }])
+}
+
+/// Every matched window of `snapshots` once, in the one box that holds everywhere it was seen:
+/// what to hide for a whole clip when the log can't say when it was there.
+fn held_everywhere(snapshots: &[WindowSnapshot], patterns: &Patterns) -> Vec<WindowEntry> {
     let mut held: Vec<WindowEntry> = Vec::new();
-    for window in slice
-        .snapshots
+    for window in snapshots
         .iter()
         .flat_map(|s| &s.windows)
         .filter(|w| patterns.matches(&w.app, &w.title))
@@ -606,23 +611,40 @@ pub fn replay_windows(slice: Slice, patterns: &Patterns) -> Result<Vec<WindowSna
             None => held.push(window.clone()),
         }
     }
-    Ok(vec![WindowSnapshot { t: 0, windows: held }])
+    held
 }
+
+/// What the picture becomes when nothing says what was on screen.
+const BLACKOUT: Blur = Blur { rect: [0.0, 0.0, 1.0, 1.0], start_ms: 0, end_ms: u64::MAX, solid: true };
 
 /// What `finalize_capture_bundle` needs of the redaction: the places to hide.
 pub struct Redaction {
     blurs: Vec<Blur>,
+    notice: Option<&'static str>,
 }
+
+/// Said in `summary.md` (as the note) and in a notification when the picture was blacked out for
+/// want of a window log.
+const NO_LOG_NOTICE: &str = "The picture was blacked out: the window log was unavailable (Hyprland did not \
+    answer), so Scrawl could not tell whether a window from `redactApps` was on screen. Audio, \
+    transcript, marks and events are intact. Set `redactApps` to [] to record without hiding windows.";
 
 impl Redaction {
     /// Finds what the config hides in the window log (before any title goes), then replaces the
-    /// matched windows' titles in `snapshots` and `target`.
+    /// matched windows' titles in `snapshots` and `target`. `gaps`: the log says a stretch went
+    /// unwatched (`ActivityLog::window_gaps`).
     pub fn prepare(
         snapshots: &mut [WindowSnapshot],
         target: &mut TargetInfo,
         video_offset_ms: u64,
+        gaps: bool,
     ) -> Self {
-        Self::prepare_with(&Patterns::configured(), snapshots, target, video_offset_ms)
+        Self::prepare_with(&Patterns::configured(), snapshots, target, video_offset_ms, gaps)
+    }
+
+    /// What to tell the user, when the redaction had to give up the whole picture.
+    pub fn notice(&self) -> Option<&'static str> {
+        self.notice
     }
 
     /// `prepare` for these patterns. The log's bounds are from the capture's corner, whatever the
@@ -631,26 +653,47 @@ impl Redaction {
     /// A window capture whose own window matches is hidden whole for its entire length (the
     /// log can't be trusted to follow a window whose title changes, and nothing in it is
     /// meant to be seen). A phone's screen has no windows.
+    ///
+    /// Fails closed when the log can't be trusted, as a replay save does. With patterns and no
+    /// look at the windows at all (Hyprland never answered) the whole picture is filled black
+    /// for the whole recording, rather than published unredacted: refusing or deleting would
+    /// cost the narration, strokes and events as well, which are the value of the capture and
+    /// carry no pixels, and the black picture says so (`notice`). With a log that has holes (a
+    /// stretch of the recording unwatched) every matched window seen anywhere in it is hidden
+    /// for the whole recording, in the box that holds everywhere it was, besides what the log
+    /// plans. No patterns (`redactApps: []`) is no redaction and no cost.
     fn prepare_with(
         patterns: &Patterns,
         snapshots: &mut [WindowSnapshot],
         target: &mut TargetInfo,
         video_offset_ms: u64,
+        gaps: bool,
     ) -> Self {
         let own = target.mode == CaptureMode::Window
             && patterns.matches(
                 target.app.as_deref().unwrap_or_default(),
                 target.window_title.as_deref().unwrap_or_default(),
             );
+        let mut notice = None;
         let blurs = if own {
-            vec![Blur { rect: [0.0, 0.0, 1.0, 1.0], start_ms: 0, end_ms: u64::MAX, solid: true }]
-        } else if target.mode == CaptureMode::Device {
+            vec![BLACKOUT]
+        } else if target.mode == CaptureMode::Device || patterns.is_empty() {
             Vec::new()
+        } else if snapshots.is_empty() {
+            scrawl_log("Redaction: no window log, so the whole picture is blacked out");
+            notice = Some(NO_LOG_NOTICE);
+            vec![BLACKOUT]
         } else {
-            plan(snapshots, patterns, target.frame, video_offset_ms)
+            let mut blurs = plan(snapshots, patterns, target.frame, video_offset_ms);
+            if gaps {
+                scrawl_log("Redaction: the window log has gaps; hiding every matching window it saw for the whole recording");
+                let held = [WindowSnapshot { t: 0, windows: held_everywhere(snapshots, patterns) }];
+                blurs.extend(plan(&held, patterns, target.frame, video_offset_ms));
+            }
+            blurs
         };
         scrub_titles(snapshots, target, patterns);
-        Self { blurs }
+        Self { blurs, notice }
     }
 
     /// Hides the places in `video`, which no frame is taken from before this is done. Nothing
@@ -945,14 +988,14 @@ mod tests {
         )];
         for mode in [CaptureMode::Region, CaptureMode::Window] {
             let mut shown = target_at(mode, Some("kitty"), Some("shell"));
-            let redaction = Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut shown, 0);
+            let redaction = Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut shown, 0, false);
             assert_eq!(redaction.blurs.len(), 1, "{mode:?}");
             // Cut at the area's left edge, with the 8 pt margin on the other sides.
             assert_eq!(redaction.blurs[0].rect, [0.0, 0.184, 0.158, 0.616], "{mode:?}");
         }
         // A phone's own screen has no windows to hide.
         let mut phone = target_at(CaptureMode::Device, None, None);
-        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut phone, 0).blurs.is_empty());
+        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut phone, 0, false).blurs.is_empty());
     }
 
     #[test]
@@ -961,7 +1004,7 @@ mod tests {
         // By class, and by a title that only the target knew (the log has no entry for it).
         for (patterns, app, title) in [(pass(), "org.pass.Manager", "Vault"), (patterns(&["title:*bank*"]), "helium", "My Bank")] {
             let mut shown = target_at(CaptureMode::Window, Some(app), Some(title));
-            let redaction = Redaction::prepare_with(&patterns, &mut log.to_vec(), &mut shown, 0);
+            let redaction = Redaction::prepare_with(&patterns, &mut log.to_vec(), &mut shown, 0, false);
             assert_eq!(
                 redaction.blurs,
                 [Blur { rect: [0.0, 0.0, 1.0, 1.0], start_ms: 0, end_ms: u64::MAX, solid: true }]
@@ -970,10 +1013,10 @@ mod tests {
         }
         // An area that happens to be named after a matching window isn't that window.
         let mut area = target_at(CaptureMode::Region, Some("org.pass.Manager"), Some("Vault"));
-        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut area, 0).blurs.is_empty());
+        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut area, 0, false).blurs.is_empty());
         // A window that doesn't match, with nothing matching on screen: nothing to do.
         let mut other = target_at(CaptureMode::Window, Some("kitty"), Some("shell"));
-        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut other, 0).blurs.is_empty());
+        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut other, 0, false).blurs.is_empty());
     }
 
     #[test]
@@ -981,6 +1024,54 @@ mod tests {
         // The config isn't read here: `wants_window_log` is the display rule plus a non-empty list.
         assert!(wants_window_log(&target_at(CaptureMode::Display, None, None)));
         assert!(!wants_window_log(&target_at(CaptureMode::Device, None, None)));
+    }
+
+    // MARK: A log that can't be trusted
+
+    #[test]
+    fn with_patterns_and_no_window_log_the_picture_is_blacked_out_and_the_user_told() {
+        for mode in [CaptureMode::Display, CaptureMode::Window, CaptureMode::Region] {
+            let mut shown = target_at(mode, Some("kitty"), Some("shell"));
+            let redaction = Redaction::prepare_with(&pass(), &mut Vec::new(), &mut shown, 0, false);
+            assert_eq!(redaction.blurs, [BLACKOUT], "{mode:?}");
+            assert!(redaction.notice().is_some_and(|n| n.contains("blacked out") && n.contains("redactApps")));
+        }
+        // `redactApps: []` is no redaction, and costs nothing, log or not.
+        let mut shown = target_at(CaptureMode::Display, None, None);
+        let off = Redaction::prepare_with(&patterns(&[]), &mut Vec::new(), &mut shown, 0, true);
+        assert!(off.blurs.is_empty() && off.notice().is_none());
+        // A phone's screen has no windows; a log that worked and saw nothing is a log.
+        let mut phone = target_at(CaptureMode::Device, None, None);
+        assert!(Redaction::prepare_with(&pass(), &mut Vec::new(), &mut phone, 0, false).blurs.is_empty());
+        let mut shown = target_at(CaptureMode::Display, None, None);
+        let seen_nothing = Redaction::prepare_with(&pass(), &mut [snapshot(0, vec![])], &mut shown, 0, false);
+        assert!(seen_nothing.blurs.is_empty() && seen_nothing.notice().is_none());
+        // A window capture of a matching window is black on its own, without the notice.
+        let mut own = target_at(CaptureMode::Window, Some("org.pass.Manager"), Some("Vault"));
+        let redaction = Redaction::prepare_with(&pass(), &mut Vec::new(), &mut own, 0, false);
+        assert_eq!(redaction.blurs, [BLACKOUT]);
+        assert!(redaction.notice().is_none());
+    }
+
+    #[test]
+    fn a_log_with_gaps_hides_every_matching_window_it_saw_for_the_whole_recording() {
+        // The manager is seen for a moment in the middle of a recording whose log has holes.
+        let log = vec![
+            snapshot(0, vec![window(2, "kitty", "", [0, 0, 400, 400])]),
+            snapshot(5_000, vec![hidden("pass", 1, [100, 100, 200, 100])]),
+            snapshot(6_000, vec![hidden("pass", 1, [300, 50, 200, 100])]),
+            snapshot(7_000, vec![window(2, "kitty", "", [0, 0, 400, 400])]),
+        ];
+        let blurs_for = |gaps: bool| {
+            let mut shown = target_at(CaptureMode::Display, None, None);
+            Redaction::prepare_with(&pass(), &mut log.clone(), &mut shown, 0, gaps).blurs
+        };
+        assert!(blurs_for(false).iter().all(|b| b.end_ms != u64::MAX), "without holes it is only where it was seen");
+        let held = blurs_for(true);
+        let whole = held.iter().find(|b| (b.start_ms, b.end_ms) == (0, u64::MAX)).expect("a blur for the whole recording");
+        // One box over where it was at both looks, the margin included.
+        assert_eq!(whole.rect, [0.092, 0.084, 0.508, 0.416]);
+        assert!(!whole.solid);
     }
 
     // MARK: A replay's log
@@ -1104,7 +1195,7 @@ mod tests {
         let frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
         let blurs = plan(&log_with_a_window(), &pass(), frame, 0);
         assert!(!blurs.is_empty());
-        let redaction = Redaction { blurs };
+        let redaction = Redaction { blurs, notice: None };
         assert!(redaction.apply(Some(&video)).is_some());
 
         // Copied as they were: before the window and after it (the pieces at 0-1 s, 9-12 s).
@@ -1155,7 +1246,7 @@ mod tests {
         let mut windows = replay_windows(slice, &pass()).unwrap();
         let mut shown = target_at(CaptureMode::Display, None, None);
         shown.frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
-        let redaction = Redaction::prepare_with(&pass(), &mut windows, &mut shown, 0);
+        let redaction = Redaction::prepare_with(&pass(), &mut windows, &mut shown, 0, false);
         assert_eq!(windows[2].windows[0].title, REDACTED, "the saved log carries no title either");
         assert!(redaction.apply(Some(&video)).is_some());
         assert!(blocky(&gray(&video, 4.5167), 160, 170, 4));
@@ -1174,7 +1265,7 @@ mod tests {
         let (dir, video) = movie("window", false);
         let mut shown = target_at(CaptureMode::Window, Some("org.pass.Manager"), Some("Vault"));
         shown.frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
-        let redaction = Redaction::prepare_with(&pass(), &mut Vec::new(), &mut shown, 0);
+        let redaction = Redaction::prepare_with(&pass(), &mut Vec::new(), &mut shown, 0, false);
         assert!(redaction.apply(Some(&video)).is_some());
         for t in [0.2, 6.0, 11.8] {
             let frame = gray(&video, t);
@@ -1190,7 +1281,7 @@ mod tests {
         shown.frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
         // In the area's own coordinates: hangs off the left edge and the top.
         let mut log = vec![snapshot(0, vec![hidden("pass", 1, [-100, -60, 300, 200])])];
-        let redaction = Redaction::prepare_with(&pass(), &mut log, &mut shown, 0);
+        let redaction = Redaction::prepare_with(&pass(), &mut log, &mut shown, 0, false);
         assert!(redaction.apply(Some(&video)).is_some());
         let (before, after) = (gray(&original, 5.5167), gray(&video, 5.5167));
         assert!(mean_difference(&before, &after, 0..180, 0..120) > 20.0, "the overlap is hidden");
@@ -1199,11 +1290,30 @@ mod tests {
     }
 
     #[test]
+    fn a_recording_with_no_window_log_comes_out_black_with_its_audio_and_every_frame() {
+        let (dir, video) = movie("nolog", true);
+        let original = dir.join("original.mp4");
+        std::fs::copy(&video, &original).unwrap();
+        let mut shown = target_at(CaptureMode::Region, Some("kitty"), None);
+        shown.frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
+        let redaction = Redaction::prepare_with(&pass(), &mut Vec::new(), &mut shown, 0, false);
+        assert!(redaction.notice().is_some());
+        assert!(redaction.apply(Some(&video)).is_some());
+        for t in [0.2, 6.0, 11.8] {
+            assert!(gray(&video, t).iter().all(|&v| v < 24), "{t}");
+            assert!(gray(&original, t).iter().any(|&v| v > 60), "the test pattern is not black");
+        }
+        assert_eq!(media::probe(&video).unwrap().audio_tracks, 1);
+        assert_eq!(packets(&video).unwrap().0, packets(&original).unwrap().0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_window_there_from_start_to_end_rewrites_the_whole_recording() {
         let (dir, video) = movie("whole", false);
         let log = [snapshot(0, vec![hidden("pass", 1, [160, 90, 200, 120])])];
         let frame = TargetFrame { x: 0.0, y: 0.0, width: W as f64, height: H as f64, scale: 1.0 };
-        let redaction = Redaction { blurs: plan(&log, &pass(), frame, 0) };
+        let redaction = Redaction { blurs: plan(&log, &pass(), frame, 0), notice: None };
         assert!(redaction.apply(Some(&video)).is_some());
         for t in [0.2, 6.0, 11.8] {
             assert!(blocky(&gray(&video, t), 160, 170, 4), "{t}");
@@ -1216,7 +1326,7 @@ mod tests {
     fn with_nothing_to_hide_the_recording_is_left_alone() {
         let (dir, video) = movie("none", false);
         let before = std::fs::read(&video).unwrap();
-        assert_eq!(Redaction { blurs: Vec::new() }.apply(Some(&video)), None);
+        assert_eq!(Redaction { blurs: Vec::new(), notice: None }.apply(Some(&video)), None);
         assert_eq!(std::fs::read(&video).unwrap(), before);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1228,7 +1338,7 @@ mod tests {
         let video = dir.join("recording.mp4");
         std::fs::write(&video, b"not a movie").unwrap();
         let blur = Blur { rect: [0.0, 0.0, 0.5, 0.5], start_ms: 0, end_ms: u64::MAX, solid: false };
-        assert_eq!(Redaction { blurs: vec![blur] }.apply(Some(&video)), None);
+        assert_eq!(Redaction { blurs: vec![blur], notice: None }.apply(Some(&video)), None);
         assert!(!video.exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
