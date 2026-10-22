@@ -133,3 +133,37 @@ hl.bind("ALT + SHIFT + R", hl.dsp.exec_cmd("scrawl replay"))
 Documented in the README section "Replay buffer": an always-on, opt-in recording; the microphone is
 open and recorded (locally, in RAM) the whole time Scrawl runs, and the Noctalia privacy indicator
 ignores scrawl and wf-recorder, so it will not show it.
+
+## Follow-up: window log and `redactApps` for replay clips (branch `linux-port`)
+
+Gap closed: a clip saved from the buffer had no window log, so `redactApps` never ran on it.
+
+- **Rolling log** (`src/linux/window_ring.rs`). The buffer's `Run` owns a `WindowRing`: a thread taking
+  `hypr::sample_windows(frame)` (the recording logger's own sampling: `monitors` + `clients`, about
+  0.1 ms a second) every second. `RollingLog` stores a sample only when the window list changed, plus
+  the look just before each change (so a window that appears is placed within a second of when it did,
+  not "anywhere since the last change"), pruned by `Run::tend` to window + 6 s margin keeping the state
+  the kept part began in. It lives and dies with the `Run`: paused/discarded while a recording runs or
+  the session is locked, with the ring. Dropping it stops the thread without waiting for a slow socket.
+- **Save.** `Run::save` takes one last look, slices the log to the clip (`t` in ms from the clip's
+  start, first entry at 0) and passes it as `Saved::activity`, which `save_bundle` hands to
+  `finalize_capture_bundle`; the normal finish then plans, scrubs titles and blurs. The replay bundle
+  now also has the windows in `scrawl.json` (titles of matched windows `(redacted)`).
+- **Fail closed** (`redact::replay_windows`, run before the recorder is stopped or anything cut):
+  - redact list empty: nothing checked, slice handed over.
+  - log covers the clip (no gap longer than 3 s, no late start / early end): used as is.
+  - log has holes: every matched window seen anywhere in the slice or at the save is taken to be there
+    for the whole clip (one box per window over all its positions), via a single snapshot at 0.
+  - log has nothing (Hyprland did not answer for the whole stretch): the save is refused, with a
+    notification naming `redactApps` (`[]` saves without hiding). Chosen over blurring blindly: with
+    no data there is nothing to put a box on, and "blur everything" would destroy every clip for a
+    transient socket error. Residual: a hole during which a matching window opened and closed unseen,
+    with none seen elsewhere, hides nothing (the 3 s tolerance bounds this to a missed few looks).
+  - The refusal ends the buffer (it restarts at the next look with a fresh log), since the save took the
+    run.
+- **Tests:** `window_ring` (change-only storage with the look before a change, opening state,
+  pruning, gaps, late start/early end, failures, the thread's cadence and stop-on-drop, final look);
+  `redact` (complete log passed through, refusal with no log, conservative whole-clip box, end to end
+  with ffmpeg: a rolling log's window blurred in a stand-in clip, copied pieces byte-identical);
+  `replay` (refused save leaves no clip and removes the ring; the `--ignored` 11 s ring test also
+  checks the saved activity carries the windows). Synthetic sources only.

@@ -144,3 +144,33 @@ hook; Settings read-only list; solid slide bands; README and this report.
 - Finish time on an idle machine and on a long (60 s+) capture with the window visible throughout.
 - Playback of the joined `recording.mp4` in the player the user actually uses (parameter sets are
   in-band in the pieces; ffmpeg decodes it, other players untested).
+
+## Follow-up: window and area captures, replay clips (branch `linux-port`)
+
+Closes the two limits listed above ("Window and region captures are not redacted").
+
+- **Window and area captures are redacted.** wf-recorder records both as a screen rectangle
+  (`-g`), so what has to be hidden is the screen's matched windows over that rectangle. The window
+  log now runs for them too, when the patterns are not empty (`redact::wants_window_log`; with
+  `redactApps: []` nothing starts; `platform::logs_windows` is the seam, macOS keeps display-only).
+  `hypr::sample_windows(frame)` finds the monitor by its corner (display) or the one holding the
+  capture's centre, and `capture_entries` maps bounds into the capture's coordinates (the contract
+  `WindowEntry::bounds` already documented: from the capture's corner, negative when hanging off),
+  dropping windows that don't reach it. The existing `plan` then clips a matched window at the
+  capture's edge, with margin, padding and slide bands unchanged. No cursor sampling for these (the
+  input recorder has it). Display captures: unchanged (same monitor lookup, zero shift).
+- **A window capture of a matching window** (class or `title:` pattern on the target) is filled solid
+  black whole for its entire length, without relying on the log following the window. A region named
+  after a window under its centre is not treated as that window.
+- **Overlap with other windows** is the same plan: other matched windows overlapping the captured
+  window's rectangle are cut in. Known over-blur: a matched window behind the captured one inside
+  the rectangle is blurred too (the log has no occlusion test).
+- **Cost** (measured on this Hyprland, read-only socket queries): `j/monitors` 0.046 ms and `j/clients`
+  0.048 ms wall each (about 0.02 ms of client CPU), once a second, plus the `activewindow` focus
+  check at 10 Hz that display captures already do. Nothing to speak of.
+- **Not changed:** if Hyprland can't answer during an ordinary recording or area capture the log is
+  empty and nothing is hidden (log line `Window log: 0 snapshots`). Only replay saves fail closed.
+- **Tests:** `hypr` (window capture maps bounds, area found by centre, display unchanged);
+  `redact` (area/window planning in capture coordinates, device none, own-window whole-frame blur
+  and the region exception, with ffmpeg: whole-frame black on a window capture, a cut-in overlap in
+  an area, the other regions untouched).
