@@ -242,11 +242,20 @@ the capture, so a password manager open on the side never reaches the agent or t
 - **Fails closed.** The pieces are written under `$XDG_RUNTIME_DIR` (memory), and the recording is
   replaced by the finished file. If the rewrite fails, `recording.mp4` is deleted rather than kept
   unblurred (the log says so).
-- **What it does not do.** Only whole-screen captures are redacted (the window log is only taken for
-  them); a window or region capture isn't, and neither is the narration. Anything is recorded
+- **Windows, areas and replays.** A window or an area capture (wf-recorder records both as a screen
+  rectangle) has the same window log when `redactApps` is not empty, with the windows' bounds moved to
+  the capture's corner: a matched window that overlaps it is blurred where it overlaps, one that doesn't
+  reach it is ignored. A window capture of a window that itself matches (its class or title) is filled
+  black whole, for its entire length. The window log costs one look a second plus a focus check ten
+  times a second (the same as a display capture's, without the cursor); with `redactApps: []` it isn't
+  started. A matched window behind the captured window, in the rectangle, is blurred too (the log does
+  not know what is covered). A replay-buffer save has no window log yet.
+- **What it does not do.** The narration isn't redacted. Anything is recorded
   unblurred by `wf-recorder` until the capture finishes, so a capture that is cancelled or crashes
-  leaves its `recording.mp4` as it was. The browser context (`devContext`) is not filtered by these
-  patterns. macOS captures are untouched.
+  leaves its `recording.mp4` as it was. If Hyprland can't be asked for the window list during a
+  recording or an area capture, nothing is found to hide (the log line `Window log: 0 snapshots`
+  says so); only a replay save is refused in that case. The browser context (`devContext`) is not
+  filtered by these patterns. macOS captures are untouched.
 
 ### Browser and project context
 

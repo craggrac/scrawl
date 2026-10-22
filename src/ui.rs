@@ -2607,7 +2607,7 @@ impl ScrawlCoordinator {
             .started_at
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let window_log = (target.mode == CaptureMode::Display).then(|| {
+        let window_log = crate::platform::logs_windows(&target).then(|| {
             crate::platform::WindowLogger::start(
                 target.frame,
                 started_at,

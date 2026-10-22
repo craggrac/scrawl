@@ -19,6 +19,11 @@ pub use crate::native::pill::NativePill;
 pub use crate::phone::PhoneSession;
 pub use crate::windows::WindowLogger;
 
+/// Whether a capture of `target` keeps a window log: display captures only.
+pub fn logs_windows(target: &TargetInfo) -> bool {
+    target.mode == crate::model::CaptureMode::Display
+}
+
 /// Browser and project context is collected on Linux only (`crate::linux::context`).
 pub struct ContextCollector;
 

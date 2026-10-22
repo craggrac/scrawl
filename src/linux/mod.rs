@@ -24,7 +24,6 @@ use anyhow::{Context, Result};
 use crate::audio::{self, AudioRecorder};
 use crate::capture::scrawl_log;
 use crate::handoff;
-use crate::model::CaptureMode;
 
 /// How long the "Recording" notification stays: it lands in the first frames.
 const START_NOTICE_MS: u32 = 1_500;
@@ -150,7 +149,7 @@ fn capture_into(
     // From here the recording is never deleted, however later steps fail.
     let finish = || -> Result<PathBuf> {
         let request = Arc::new(AtomicBool::new(false));
-        let window_log = (target.mode == CaptureMode::Display).then(|| {
+        let window_log = redact::wants_window_log(&target).then(|| {
             hypr::WindowLogger::start(target.frame, started_at, Arc::clone(&request))
         });
         let input = input::InputRecorder::start(target.frame, started_at, request, None);

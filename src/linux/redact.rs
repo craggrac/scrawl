@@ -10,6 +10,12 @@
 //! The video is rewritten in pieces: it is cut at keyframes, only the pieces a blur touches are
 //! re-encoded and the rest are copied, then everything is joined again. A capture where no
 //! window matches costs nothing.
+//!
+//! Every kind of capture is covered. A display capture's log is the monitor's windows; a window
+//! or an area capture (which wf-recorder records as a screen rectangle) logs the same windows
+//! with their bounds moved to the capture's corner and is planned the same way, so a matched
+//! window that overlaps it is cut at its edge. A window capture of a matching window is
+//! filled black whole.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,6 +25,7 @@ use anyhow::{Context, Result, ensure};
 
 use crate::linux::media;
 use crate::model::{CaptureMode, TargetFrame, TargetInfo};
+use crate::capture::scrawl_log;
 use crate::windows::WindowSnapshot;
 
 /// What `redactApps` holds when the config doesn't say: the password managers. A password
@@ -70,6 +77,11 @@ impl Patterns {
                 })
                 .collect(),
         )
+    }
+
+    /// Whether there is nothing to hide.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// The configured patterns.
@@ -132,6 +144,17 @@ pub fn scrub_titles(snapshots: &mut [WindowSnapshot], target: &mut TargetInfo, p
         && patterns.matches(app, title)
     {
         *title = REDACTED.to_owned();
+    }
+}
+
+/// Whether a capture of `target` needs a window log for the redaction: a display capture
+/// always has one (it also feeds the autocrop), a window or an area only when something is to
+/// be hidden, so with `redactApps: []` they cost nothing.
+pub fn wants_window_log(target: &TargetInfo) -> bool {
+    match target.mode {
+        CaptureMode::Display => true,
+        CaptureMode::Window | CaptureMode::Region => !Patterns::configured().is_empty(),
+        CaptureMode::Device => false,
     }
 }
 
@@ -555,14 +578,34 @@ impl Redaction {
         target: &mut TargetInfo,
         video_offset_ms: u64,
     ) -> Self {
-        let patterns = Patterns::configured();
-        // Only display captures keep a window log; a window or region capture has none to go by.
-        let blurs = if target.mode == CaptureMode::Display {
-            plan(snapshots, &patterns, target.frame, video_offset_ms)
-        } else {
+        Self::prepare_with(&Patterns::configured(), snapshots, target, video_offset_ms)
+    }
+
+    /// `prepare` for these patterns. The log's bounds are from the capture's corner, whatever the
+    /// kind of capture (the logger maps them), so a window or an area is planned like a
+    /// display: windows partly in it are cut at its edge, the ones outside it are ignored.
+    /// A window capture whose own window matches is hidden whole for its entire length (the
+    /// log can't be trusted to follow a window whose title changes, and nothing in it is
+    /// meant to be seen). A phone's screen has no windows.
+    fn prepare_with(
+        patterns: &Patterns,
+        snapshots: &mut [WindowSnapshot],
+        target: &mut TargetInfo,
+        video_offset_ms: u64,
+    ) -> Self {
+        let own = target.mode == CaptureMode::Window
+            && patterns.matches(
+                target.app.as_deref().unwrap_or_default(),
+                target.window_title.as_deref().unwrap_or_default(),
+            );
+        let blurs = if own {
+            vec![Blur { rect: [0.0, 0.0, 1.0, 1.0], start_ms: 0, end_ms: u64::MAX, solid: true }]
+        } else if target.mode == CaptureMode::Device {
             Vec::new()
+        } else {
+            plan(snapshots, patterns, target.frame, video_offset_ms)
         };
-        scrub_titles(snapshots, target, &patterns);
+        scrub_titles(snapshots, target, patterns);
         Self { blurs }
     }
 
@@ -575,14 +618,14 @@ impl Redaction {
         match blur_video(video, &self.blurs) {
             Ok(()) => {
                 let ms = began.elapsed().as_millis() as u64;
-                crate::capture::scrawl_log(format!(
+                scrawl_log(format!(
                     "Redaction: {} places hidden in the recording in {ms} ms",
                     self.blurs.len()
                 ));
                 Some(ms)
             }
             Err(error) => {
-                crate::capture::scrawl_log(format!(
+                scrawl_log(format!(
                     "Redaction failed, so the recording was deleted: {error:#}"
                 ));
                 let _ = std::fs::remove_file(video);
@@ -839,6 +882,62 @@ mod tests {
         assert_eq!(graph, "[0:v]drawbox=0:242:1920:616:black@1:t=fill:enable='between(t,1.000,2.000)'[out]");
         let both = filter(&[region, band], 2.0, 360);
         assert!(both.contains("[v1]drawbox=0:242:1920:616:black@1:t=fill:enable='between(t,3.000,4.000)'[out]"), "{both}");
+    }
+
+    fn target_at(mode: CaptureMode, app: Option<&str>, title: Option<&str>) -> TargetInfo {
+        TargetInfo { mode, ..target(app, title) }
+    }
+
+    #[test]
+    fn window_and_area_captures_are_planned_like_displays_in_their_own_coordinates() {
+        // An area of 1000x500 whose log has the password manager half out of its left edge, and
+        // another one far outside it (not in the capture at all).
+        let log = [snapshot(
+            0,
+            vec![
+                hidden("pass", 1, [-150, 100, 300, 200]),
+                hidden("pass", 2, [1_400, 100, 300, 200]),
+                window(3, "kitty", "", [0, 0, 400, 400]),
+            ],
+        )];
+        for mode in [CaptureMode::Region, CaptureMode::Window] {
+            let mut shown = target_at(mode, Some("kitty"), Some("shell"));
+            let redaction = Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut shown, 0);
+            assert_eq!(redaction.blurs.len(), 1, "{mode:?}");
+            // Cut at the area's left edge, with the 8 pt margin on the other sides.
+            assert_eq!(redaction.blurs[0].rect, [0.0, 0.184, 0.158, 0.616], "{mode:?}");
+        }
+        // A phone's own screen has no windows to hide.
+        let mut phone = target_at(CaptureMode::Device, None, None);
+        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut phone, 0).blurs.is_empty());
+    }
+
+    #[test]
+    fn a_window_capture_of_a_matching_window_is_hidden_whole_for_its_whole_length() {
+        let log = [snapshot(0, vec![window(1, "kitty", "", [0, 0, 50, 50])])];
+        // By class, and by a title that only the target knew (the log has no entry for it).
+        for (patterns, app, title) in [(pass(), "org.pass.Manager", "Vault"), (patterns(&["title:*bank*"]), "helium", "My Bank")] {
+            let mut shown = target_at(CaptureMode::Window, Some(app), Some(title));
+            let redaction = Redaction::prepare_with(&patterns, &mut log.to_vec(), &mut shown, 0);
+            assert_eq!(
+                redaction.blurs,
+                [Blur { rect: [0.0, 0.0, 1.0, 1.0], start_ms: 0, end_ms: u64::MAX, solid: true }]
+            );
+            assert_eq!(shown.window_title.as_deref(), Some(REDACTED));
+        }
+        // An area that happens to be named after a matching window isn't that window.
+        let mut area = target_at(CaptureMode::Region, Some("org.pass.Manager"), Some("Vault"));
+        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut area, 0).blurs.is_empty());
+        // A window that doesn't match, with nothing matching on screen: nothing to do.
+        let mut other = target_at(CaptureMode::Window, Some("kitty"), Some("shell"));
+        assert!(Redaction::prepare_with(&pass(), &mut log.to_vec(), &mut other, 0).blurs.is_empty());
+    }
+
+    #[test]
+    fn window_logs_are_only_wanted_for_windows_and_areas_when_something_is_hidden() {
+        // The config isn't read here: `wants_window_log` is the display rule plus a non-empty list.
+        assert!(wants_window_log(&target_at(CaptureMode::Display, None, None)));
+        assert!(!wants_window_log(&target_at(CaptureMode::Device, None, None)));
     }
 
     // MARK: With ffmpeg

@@ -512,10 +512,69 @@ pub fn window_entries(clients: &[Client], monitor: &Monitor) -> Vec<WindowEntry>
         .collect()
 }
 
+/// The monitor a capture of `frame` is on: the one whose top-left corner is the capture's (a
+/// display capture), else the one holding the capture's centre (a window or an area).
+fn monitor_for(monitors: &[Monitor], frame: TargetFrame) -> Option<&Monitor> {
+    monitors
+        .iter()
+        .find(|m| f64::from(m.x) == frame.x && f64::from(m.y) == frame.y)
+        .or_else(|| {
+            let (cx, cy) = (frame.x + frame.width / 2.0, frame.y + frame.height / 2.0);
+            monitors.iter().find(|m| {
+                let area = monitor_frame(m);
+                (area.x..area.x + area.width).contains(&cx) && (area.y..area.y + area.height).contains(&cy)
+            })
+        })
+}
+
+/// The windows of `monitor` with their bounds from the top-left of `frame`, the capture. For a
+/// display capture that is `window_entries` as it is; for a window or an area the bounds move
+/// to the capture's corner (they may be negative, as `WindowEntry::bounds` allows) and the
+/// windows that don't reach it are left out.
+pub fn capture_entries(clients: &[Client], monitor: &Monitor, frame: TargetFrame) -> Vec<WindowEntry> {
+    let mut entries = window_entries(clients, monitor);
+    let shown = monitor_frame(monitor);
+    if (shown.width - frame.width).abs() < 1.0 && (shown.height - frame.height).abs() < 1.0 {
+        return entries;
+    }
+    let dx = (f64::from(monitor.x) - frame.x).round() as i32;
+    let dy = (f64::from(monitor.y) - frame.y).round() as i32;
+    let (width, height) = (frame.width.round() as i32, frame.height.round() as i32);
+    for entry in &mut entries {
+        entry.bounds[0] += dx;
+        entry.bounds[1] += dy;
+    }
+    entries.retain(|e| {
+        let [x, y, w, h] = e.bounds;
+        x < width && y < height && x + w > 0 && y + h > 0
+    });
+    entries
+}
+
+/// One look at the windows on screen for a capture of `frame` (`capture_entries`), `None` when
+/// Hyprland can't be asked or the capture is on no monitor. Two socket requests.
+pub fn sample_windows(frame: TargetFrame) -> Option<Vec<WindowEntry>> {
+    let monitors = hypr_json::<Vec<Monitor>>("monitors").ok()?;
+    let clients = hypr_json::<Vec<Client>>("clients").ok()?;
+    let monitor = monitor_for(&monitors, frame)?;
+    Some(capture_entries(&clients, monitor, frame))
+}
+
+/// Whether `frame` is a whole monitor (as `WindowLogger` is meant for), when that can be told.
+fn is_display(frame: TargetFrame) -> bool {
+    hypr_json::<Vec<Monitor>>("monitors").map_or(true, |monitors| {
+        monitor_for(&monitors, frame).is_some_and(|m| {
+            let shown = monitor_frame(m);
+            (shown.width - frame.width).abs() < 1.0 && (shown.height - frame.height).abs() < 1.0
+        })
+    })
+}
+
 /// Logs the cursor every tick and the window list every second or when focus moves, like the
-/// macOS `windows::WindowLogger`. Like on macOS it is only started for display targets: `frame`
-/// must be a monitor's `monitor_frame`, since windows are matched to that monitor by its origin
-/// and their bounds are relative to it.
+/// macOS `windows::WindowLogger`. For a display capture `frame` is the monitor's
+/// `monitor_frame`; for a window or an area (started only so `redact` can hide windows in it) it
+/// is that rectangle: the windows of the monitor holding it are logged with bounds from its
+/// corner (`capture_entries`), and the cursor is not (the input recorder has it).
 pub struct WindowLogger {
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<ActivityLog>>,
@@ -561,10 +620,11 @@ fn run(
     let mut log = ActivityLog::default();
     let mut last_snapshot: Option<Instant> = None;
     let mut last_front: Option<String> = None;
+    let with_cursor = is_display(frame);
     loop {
         let finishing = stopping.load(Ordering::Acquire);
         let t = started_at.elapsed().as_millis() as u64;
-        if let Ok(cursor) = hypr_json::<CursorPos>("cursorpos") {
+        if with_cursor && let Ok(cursor) = hypr_json::<CursorPos>("cursorpos") {
             log.push_cursor(t, cursor.x - frame.x, cursor.y - frame.y, frame);
         }
         let front = hypr_json::<ActiveWindow>("activewindow").ok().map(|w| w.address);
@@ -574,14 +634,8 @@ fn run(
                 || request.swap(false, Ordering::AcqRel));
         if due {
             let began = Instant::now();
-            if let (Ok(monitors), Ok(clients)) = (
-                hypr_json::<Vec<Monitor>>("monitors"),
-                hypr_json::<Vec<Client>>("clients"),
-            ) && let Some(monitor) = monitors
-                .iter()
-                .find(|m| f64::from(m.x) == frame.x && f64::from(m.y) == frame.y)
-            {
-                log.push_windows(t, window_entries(&clients, monitor));
+            if let Some(entries) = sample_windows(frame) {
+                log.push_windows(t, entries);
             }
             log.snapshot_calls += 1;
             log.snapshot_time += began.elapsed();
@@ -977,6 +1031,49 @@ mod tests {
     fn bounds_are_relative_to_the_monitor() {
         let entries = window_entries(&clients(), &monitors()[1]);
         assert_eq!(entries[0].bounds, [10, 40, 1000, 800]);
+    }
+
+    fn frame_at(x: f64, y: f64, width: f64, height: f64) -> TargetFrame {
+        TargetFrame { x, y, width, height, scale: 1.0 }
+    }
+
+    #[test]
+    fn a_window_capture_logs_windows_from_its_own_corner_and_drops_those_it_does_not_reach() {
+        // The capture of the kitty window: 600,300 700x400 on the first monitor.
+        let frame = frame_at(600.0, 300.0, 700.0, 400.0);
+        let monitors = monitors();
+        let monitor = monitor_for(&monitors, frame).unwrap();
+        assert_eq!(monitor.id, 0);
+        let entries = capture_entries(&clients(), monitor, frame);
+        let bounds: Vec<_> = entries.iter().map(|e| (e.app.as_str(), e.bounds)).collect();
+        assert_eq!(bounds, [("kitty", [0, 0, 700, 400]), ("com.t3tools.T3Code", [-590, -248, 1900, 1018])]);
+        // An area at the top left that the floating kitty doesn't reach.
+        let corner = frame_at(0.0, 0.0, 300.0, 200.0);
+        let apps: Vec<_> = capture_entries(&clients(), monitor, corner).into_iter().map(|e| e.app).collect();
+        assert_eq!(apps, ["com.t3tools.T3Code"]);
+    }
+
+    #[test]
+    fn an_area_on_the_second_monitor_is_found_by_its_centre() {
+        let monitors = monitors();
+        // Straddling the two monitors, it belongs to the one holding its centre (1900).
+        let straddling = frame_at(1800.0, 20.0, 200.0, 100.0);
+        assert_eq!(monitor_for(&monitors, straddling).unwrap().id, 0);
+        let frame = frame_at(1925.0, 20.0, 400.0, 300.0);
+        let monitor = monitor_for(&monitors, frame).unwrap();
+        assert_eq!(monitor.id, 1);
+        let entries = capture_entries(&clients(), monitor, frame);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].bounds, [5, 20, 1000, 800]);
+        assert!(monitor_for(&monitors, frame_at(9_000.0, 0.0, 10.0, 10.0)).is_none());
+    }
+
+    #[test]
+    fn a_display_capture_logs_what_it_always_did() {
+        let monitors = monitors();
+        let frame = monitor_frame(&monitors[1]);
+        let monitor = monitor_for(&monitors, frame).unwrap();
+        assert_eq!(capture_entries(&clients(), monitor, frame), window_entries(&clients(), monitor));
     }
 
     #[test]
