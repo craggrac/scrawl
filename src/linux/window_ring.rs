@@ -55,10 +55,17 @@ pub struct Slice {
 impl RollingLog {
     /// Stores what a look at `at` saw; `None` (the look failed) stores nothing, and the next
     /// good one records the gap.
+    ///
+    /// Samples must arrive in time order: one older than the newest held is stale (a look that
+    /// began before a newer one was stored) and is dropped, so the log never holds an older
+    /// state as the latest.
     pub fn record(&mut self, at: SystemTime, windows: Option<Vec<WindowEntry>>) {
         let Some(windows) = windows else {
             return;
         };
+        if self.last_ok.is_some_and(|last| at < last) {
+            return;
+        }
         if let Some(last) = self.last_ok
             && at.duration_since(last).is_ok_and(|d| d > MAX_GAP)
         {
@@ -95,10 +102,13 @@ impl RollingLog {
     pub fn slice(&self, start: SystemTime, end: SystemTime) -> Slice {
         let millis = |at: SystemTime| at.duration_since(start).map_or(0, |d| d.as_millis() as u64);
         let opening = self.samples.partition_point(|(at, _)| *at <= start).saturating_sub(1);
+        // The looks after the end count too, as if at the end: a window that appeared between
+        // the last look before the end and the end itself is only known from the next look (the
+        // plan covers the interval before it), and a save's own final look is stored a moment
+        // after its end, behind the background thread's.
         let snapshots: Vec<WindowSnapshot> = self.samples[opening..]
             .iter()
-            .take_while(|(at, _)| *at <= end)
-            .map(|(at, windows)| WindowSnapshot { t: millis(*at), windows: windows.clone() })
+            .map(|(at, windows)| WindowSnapshot { t: millis((*at).min(end)), windows: windows.clone() })
             .collect();
         let covered = |a: SystemTime, b: SystemTime| b.duration_since(a).is_ok_and(|d| d <= MAX_GAP);
         let complete = match (self.first_ok, self.last_ok) {
@@ -150,8 +160,13 @@ impl WindowRing {
                 .name("scrawl-replay-windows".into())
                 .spawn(move || {
                     while !stopping.load(Ordering::Acquire) {
-                        let seen = sampler();
-                        lock(&log).record(SystemTime::now(), seen);
+                        {
+                            // Look and store under one lock, so a look is never stored after a
+                            // newer one (`finish`'s) with an older state.
+                            let mut held = lock(&log);
+                            let seen = sampler();
+                            held.record(SystemTime::now(), seen);
+                        }
                         thread::park_timeout(period);
                     }
                 })
@@ -166,11 +181,12 @@ impl WindowRing {
     }
 
     /// The log for the clip `start` to `end` (now), with one last look so the end is not a
-    /// second old.
+    /// second old. The look and its storing hold the lock (the background thread's too), and
+    /// it is stamped when it was taken, never before what is already held.
     pub fn finish(&self, start: SystemTime, end: SystemTime) -> Slice {
-        let seen = (self.sampler)();
         let mut log = lock(&self.log);
-        log.record(end, seen);
+        let seen = (self.sampler)();
+        log.record(SystemTime::now().max(end), seen);
         log.slice(start, end)
     }
 }
@@ -311,5 +327,44 @@ mod tests {
         thread::sleep(Duration::from_millis(60));
         let slice = ring.finish(SystemTime::now() - Duration::from_secs(5), SystemTime::now());
         assert_eq!(slice, Slice::default());
+    }
+
+    #[test]
+    fn a_stale_sample_is_dropped_and_the_look_just_past_the_end_is_kept() {
+        let mut log = RollingLog::default();
+        log.record(at(0.0), Some(vec![win(1)]));
+        log.record(at(1.0), Some(vec![win(1)]));
+        // A look that began before the one at 2.0 was stored but arrives after it.
+        log.record(at(2.0), Some(vec![win(1), win(2)]));
+        log.record(at(1.5), Some(vec![win(1)]));
+        assert_eq!(log.slice(at(0.0), at(2.0)).snapshots.last().unwrap().windows.len(), 2);
+        // A background look stored after the save's moment still tells what was there at it.
+        let slice = log.slice(at(0.0), at(1.9));
+        assert_eq!(lists(&slice).last().unwrap(), &(1_900, vec![1, 2]), "as if at the end");
+        assert!(slice.snapshots.windows(2).all(|pair| pair[0].t <= pair[1].t));
+    }
+
+    #[test]
+    fn a_save_racing_the_background_look_never_ends_on_the_older_state() {
+        // A look takes a while, so one that began before the window appeared can still be
+        // running when the save looks; it must not be stored after the save's newer one.
+        for _ in 0..20 {
+            let appeared = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&appeared);
+            let ring = WindowRing::start_with(
+                move || {
+                    let seen = flag.load(Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(3));
+                    Some(if seen { vec![win(1), win(2)] } else { vec![win(1)] })
+                },
+                Duration::from_millis(1),
+            );
+            thread::sleep(Duration::from_millis(10));
+            let began = SystemTime::now() - Duration::from_secs(1);
+            appeared.store(true, Ordering::SeqCst);
+            let slice = ring.finish(began, SystemTime::now());
+            assert_eq!(slice.snapshots.last().unwrap().windows.len(), 2, "{:?}", lists(&slice));
+            drop(ring);
+        }
     }
 }
