@@ -5888,6 +5888,7 @@ pub fn run_app(
                 open_keep_alive_window(cx);
                 let (menu_rx, tray) = start_linux_app(listener, &telemetry);
                 crate::linux::replay::start();
+                crate::retention::start();
                 (Some(instance), Some(menu_rx), Some(tray))
             }
             None => (None, None, None),

@@ -17,7 +17,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
@@ -41,7 +41,7 @@ const SHRINK_EDGE: u32 = crate::phone::PHONE_FRAME_EDGE;
 /// shrunk one ~2).
 const SHRINK_ABOVE_BPS: u64 = 6_000_000;
 /// How long after a capture its video is shrunk, so pasting and sending go first.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const SHRINK_DELAY: Duration = Duration::from_secs(60);
 /// A daily pass shrinks bundles left alone this long (a capture whose shrink was missed, or one
 /// copied from another Mac).
@@ -73,6 +73,8 @@ impl Default for Policy {
 }
 
 /// The choices in the menu bar's Keep Recordings menu.
+// Linux has no Keep Recordings menu yet; only `Week` (the default) is built there.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
     Week,
@@ -167,10 +169,10 @@ impl Drop for Claim {
 }
 
 /// Held by a running capture; cleanup and re-encoding wait until none is.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub struct Recording(());
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Recording {
     pub fn start() -> Self {
         RECORDING.fetch_add(1, Ordering::AcqRel);
@@ -178,7 +180,7 @@ impl Recording {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Drop for Recording {
     fn drop(&mut self) {
         RECORDING.fetch_sub(1, Ordering::AcqRel);
@@ -348,10 +350,17 @@ fn shrinkable(dir: &Path, manifest: &Manifest) -> Option<PathBuf> {
 pub type Trasher<'a> = &'a dyn Fn(&Path) -> Result<()>;
 
 pub fn trash(path: &Path) -> Result<()> {
-    let output = Command::new("/usr/bin/trash")
+    // macOS has `/usr/bin/trash`; on Linux `gio trash` is the FreeDesktop Trash, so it can be
+    // undone from the file manager.
+    #[cfg(target_os = "linux")]
+    let (program, args): (&str, &[&str]) = ("gio", &["trash", "--"]);
+    #[cfg(not(target_os = "linux"))]
+    let (program, args): (&str, &[&str]) = ("/usr/bin/trash", &[]);
+    let output = Command::new(program)
+        .args(args)
         .arg(path)
         .output()
-        .context("Could not run /usr/bin/trash")?;
+        .with_context(|| format!("Could not run {program}"))?;
     ensure!(
         output.status.success() && !path.exists(),
         "Could not move {} to the Trash: {}",
@@ -594,7 +603,7 @@ pub fn run_pass(
         return (actions, Report::default());
     }
     sweep_leftovers(captures, now);
-    let report = apply(&actions, policy, &trash, true);
+    let report = apply(&actions, policy, &trash, cfg!(not(target_os = "linux")));
     if report != Report::default() {
         scrawl_log(format!(
             "retention: media of {} bundle(s) and {} whole bundle(s) to the Trash, {} video(s) shrunk, {} freed, {} error(s)",
@@ -628,12 +637,24 @@ pub fn missing_media_reason(dir: &Path) -> Option<String> {
 
 // MARK: Background worker
 
+// `Pass` comes from the macOS settings window (`nudge`), `Shrink` from iPhone captures.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum Job {
     Pass,
     Shrink(PathBuf),
 }
 
 static WORKER: std::sync::OnceLock<flume::Sender<Job>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn lower_priority() {
+    // SAFETY: `gettid` has no preconditions; on Linux `setpriority(PRIO_PROCESS, tid)` changes
+    // only that thread's nice value, so the app's other threads keep theirs.
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 19);
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn lower_priority() {
@@ -645,7 +666,7 @@ fn lower_priority() {
 
 /// Starts the app's cleanup: a pass shortly after launch, then daily, plus shrinking each
 /// iPhone capture a minute after it's made.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn start() {
     if WORKER.get().is_some() {
         return;
@@ -674,7 +695,7 @@ pub fn after_phone_capture(bundle: &Path) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn worker(jobs: &flume::Receiver<Job>) {
     lower_priority();
     let captures = crate::handoff::default_captures_dir();
@@ -746,7 +767,7 @@ fn worker(jobs: &flume::Receiver<Job>) {
 }
 
 /// `Err` when the bundle is busy and should be retried.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn shrink_now(dir: &Path) -> std::result::Result<(), ()> {
     let now = SystemTime::now();
     if recording()
@@ -779,6 +800,19 @@ fn shrink_now(dir: &Path) -> std::result::Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real Trash is never touched here (the passes below use a recording `Trasher`); this
+    /// only checks that a failing `gio trash` is reported rather than taken for success.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trashing_a_missing_path_is_an_error() {
+        let missing = std::env::temp_dir().join(format!(
+            "scrawl-retention-missing-{}-{}",
+            std::process::id(),
+            crate::make_bundle_id()
+        ));
+        assert!(trash(&missing).is_err());
+    }
 
     struct TempDir(PathBuf);
 
