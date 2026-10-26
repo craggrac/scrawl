@@ -316,6 +316,28 @@ fn spoken_cue(word: &str) -> Option<(&'static str, f32, bool)> {
         ("these", 44.0, false),
         ("that", 42.0, false),
         ("those", 42.0, false),
+        // Brazilian Portuguese, ranked like their English counterparts: "isso" and "aí" are
+        // everyday filler, so they stay weak.
+        ("agora", 58.0, true),
+        ("aqui", 56.0, true),
+        ("olha", 58.0, true),
+        ("olhe", 58.0, true),
+        ("veja", 58.0, true),
+        ("ó", 56.0, true),
+        ("vê", 44.0, false),
+        ("ali", 44.0, false),
+        ("lá", 44.0, false),
+        ("aí", 42.0, false),
+        ("isto", 44.0, false),
+        ("isso", 42.0, false),
+        ("este", 42.0, false),
+        ("esta", 42.0, false),
+        ("esse", 42.0, false),
+        ("essa", 42.0, false),
+        ("estes", 42.0, false),
+        ("estas", 42.0, false),
+        ("esses", 42.0, false),
+        ("essas", 42.0, false),
     ]
     .into_iter()
     .find(|(cue, _, _)| *cue == word)
@@ -1208,6 +1230,75 @@ mod tests {
         );
         assert_eq!(selected2.len(), 1);
         assert_eq!(selected2[0].0.reason, KeyframeReason::SceneChange);
+    }
+
+    #[test]
+    fn portuguese_cues_are_recognised_with_their_accents() {
+        for (word, strong) in [
+            ("Olha", true),
+            ("ó,", true),
+            ("AGORA!", true),
+            ("Aqui.", true),
+            ("lá", false),
+            ("Aí,", false),
+            ("isso", false),
+        ] {
+            let (cue, _, is_strong) = spoken_cue(word).unwrap_or_else(|| panic!("{word}"));
+            assert_eq!(is_strong, strong, "{word}");
+            assert_eq!(cue, word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase());
+        }
+        assert!(spoken_cue("olhar").is_none());
+        assert!(spoken_cue("então").is_none());
+    }
+
+    #[test]
+    fn a_portuguese_cue_finds_the_change_it_points_at() {
+        let mut frames: Vec<_> = (0..=24).map(|i| frame(i * 250, 40)).collect();
+        for f in frames.iter_mut().filter(|f| f.t_ms >= 3_250) {
+            *f = frame(f.t_ms, 220);
+        }
+        let transcript = TranscriptData {
+            words: words(&[
+                (200, "Essa"),
+                (400, "é"),
+                (600, "a lista."),
+                (2_400, "Olha"),
+                (2_600, "isso"),
+                (2_800, "aqui."),
+            ]),
+            ..Default::default()
+        };
+        let selected = select_keyframes(
+            &frames,
+            &[],
+            &mut [],
+            &[click(500)],
+            &transcript,
+            MAX_KEYFRAMES,
+        );
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[1].0.t, 3_250);
+        assert_eq!(selected[1].0.reason, KeyframeReason::Speech);
+        assert!(selected[1].0.event.contains("olha"), "{}", selected[1].0.event);
+        assert_eq!(selected[1].0.said.as_deref(), Some("Olha isso aqui."));
+    }
+
+    #[test]
+    fn portuguese_cues_never_duplicate_an_unchanged_screen() {
+        let frames: Vec<_> = (0..=20).map(|i| frame(i * 250, 90)).collect();
+        let transcript = TranscriptData {
+            words: words(&[
+                (500, "Olha"),
+                (700, "isso"),
+                (900, "aqui."),
+                (3000, "Tá"),
+                (3200, "vendo,"),
+                (3400, "aí?"),
+            ]),
+            ..Default::default()
+        };
+        let selected = select_keyframes(&frames, &[], &mut [], &[], &transcript, MAX_KEYFRAMES);
+        assert_eq!(selected.len(), 1);
     }
 
     #[test]

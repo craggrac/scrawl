@@ -117,6 +117,9 @@ fn record_bundle(
     });
     let created = !bundle_dir.exists();
     std::fs::create_dir_all(&bundle_dir)?;
+    // Cleanup leaves a bundle alone while it is being recorded and built. This process is
+    // `scrawl record`, usually not the app, so it also relies on the bundle being under a day old.
+    let _busy = (crate::retention::Recording::start(), crate::retention::claim(&bundle_dir));
     capture_into(&bundle_dir, window, duration, until_stopped, note, created).inspect_err(|error| {
         scrawl_log(format!("Recording failed: {error:#}"));
     })

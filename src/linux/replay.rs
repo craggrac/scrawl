@@ -645,6 +645,8 @@ fn save_bundle() -> Result<PathBuf> {
     let bundle_dir =
         handoff::default_captures_dir().join(format!("{}.scrawl", crate::make_bundle_id()));
     std::fs::create_dir_all(&bundle_dir)?;
+    // Held until the bundle is built, so cleanup never looks at a half-written one.
+    let _busy = (crate::retention::Recording::start(), crate::retention::claim(&bundle_dir));
     let (reply, saved) = channel();
     let built = (|| {
         sender

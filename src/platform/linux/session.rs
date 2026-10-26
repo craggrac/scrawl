@@ -34,12 +34,13 @@ pub fn recorders_running() -> bool {
     RUNNING.load(Ordering::Acquire) > 0
 }
 
-struct Running;
+/// Also holds cleanup off (`retention::Recording`) while the recorder may be running.
+struct Running(#[allow(dead_code)] crate::retention::Recording);
 
 impl Running {
     fn new() -> Self {
         RUNNING.fetch_add(1, Ordering::AcqRel);
-        Self
+        Self(crate::retention::Recording::start())
     }
 }
 
