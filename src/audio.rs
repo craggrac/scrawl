@@ -2,6 +2,7 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+#[cfg(not(target_os = "linux"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -64,8 +65,44 @@ impl AudioRecorder {
         })
     }
 
+    /// The chosen microphone (`mic`), else PipeWire's default source. A chosen one that is
+    /// missing or won't open never stops the recording.
+    #[cfg(target_os = "linux")]
+    fn open_stream(
+        samples: Arc<Mutex<Vec<f32>>>,
+        error: Arc<Mutex<Option<String>>>,
+    ) -> Result<crate::linux::pwmic::Capture> {
+        use crate::linux::pwmic::Capture;
+        let inputs = crate::mic::inputs();
+        let choice = crate::mic::choice();
+        let pick = crate::mic::Pick::new(choice.as_ref(), &inputs);
+        crate::mic::note_pick(&pick);
+        // The explicit node name (the default's too) is what gets logged and recorded.
+        let device = pick.device();
+        if let Some(chosen) = device.filter(|_| matches!(pick, crate::mic::Pick::Chosen(_))) {
+            match Capture::start(Some(&chosen.id), samples.clone(), error.clone()) {
+                Ok(capture) => {
+                    crate::capture::scrawl_log(format!("Microphone: {}", chosen.name));
+                    return Ok(capture);
+                }
+                Err(e) => crate::capture::scrawl_log(format!(
+                    "Microphone: could not open {} ({e:#}); using the default",
+                    chosen.name
+                )),
+            }
+        }
+        let default = inputs.default_input();
+        let capture = Capture::start(default.map(|d| d.id.as_str()), samples, error)?;
+        crate::capture::scrawl_log(format!(
+            "Microphone: {} (default)",
+            default.map_or("PipeWire default", |d| d.name.as_str())
+        ));
+        Ok(capture)
+    }
+
     /// The chosen microphone (`mic`), else the macOS default. A chosen device that is missing or
     /// won't open never stops the recording.
+    #[cfg(not(target_os = "linux"))]
     fn open_stream(
         samples: Arc<Mutex<Vec<f32>>>,
         error: Arc<Mutex<Option<String>>>,
@@ -115,6 +152,7 @@ impl AudioRecorder {
         Ok(stream)
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn open_device(
         device: &cpal::Device,
         samples: Arc<Mutex<Vec<f32>>>,
@@ -158,6 +196,18 @@ impl AudioRecorder {
                 .map_err(|_| anyhow!("Microphone worker panicked"))??;
         }
         Ok(())
+    }
+
+    /// `stop`, for a recording that goes on without its audio when the microphone never worked:
+    /// the failure is logged, and on Linux (where nothing else would say so) notified.
+    pub fn stop_noting(self) -> Option<RecordedAudio> {
+        self.stop()
+            .inspect_err(|error| {
+                crate::capture::scrawl_log(format!("Audio: {error:#}"));
+                #[cfg(target_os = "linux")]
+                crate::linux::notify("No microphone audio was recorded; this capture has no voice.");
+            })
+            .ok()
     }
 
     pub fn stop(mut self) -> Result<RecordedAudio> {
@@ -227,10 +277,12 @@ impl Drop for AudioRecorder {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn device_name(device: &cpal::Device) -> Option<String> {
     Some(device.description().ok()?.name().to_owned())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn input_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,

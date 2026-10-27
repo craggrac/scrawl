@@ -19,13 +19,15 @@ use crate::model::{TranscriptData, TranscriptSegment, WordTiming};
 const MODEL_NAME: &str = "parakeet-tdt-0.6b-v3";
 const SAMPLES_PER_MS: u64 = 16;
 /// Speech just outside an island's energy edges, like `hex`'s clips.
-const CLIP_PAD_MS: u64 = 200;
+const CLIP_PAD_MS: u64 = 400;
 /// Shorter than this and too quiet for islands: nothing worth sending.
 const MIN_WHOLE_MS: u64 = 480;
 /// Longest clip sent to the model; Parakeet degrades on long audio.
 const MAX_CLIP_MS: u64 = 30_000;
-/// Islands closer than this belong to one clip, if it stays within `MAX_CLIP_MS`.
-const MERGE_GAP_MS: u64 = 700;
+/// Islands closer than this belong to one clip, if it stays within `MAX_CLIP_MS`. Parakeet
+/// reads whole phrases better than fragments (a 48 s capture came out with fewer garbled words
+/// as 2 clips than as 8), so this spans a thinking pause.
+const MERGE_GAP_MS: u64 = 2_500;
 /// Islands shorter than this are clicks and breaths.
 const MIN_ISLAND_MS: u64 = 120;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -124,10 +126,19 @@ fn split_span(start: u64, end: u64) -> impl Iterator<Item = (u64, u64)> {
         .map(move |from| (from, (from + MAX_CLIP_MS).min(end)))
 }
 
-/// Clips of at most 30 s: islands under 120 ms dropped, close ones (gap under 700 ms) merged
+/// Clips of at most 30 s: islands under 120 ms dropped, close ones (gap under 2.5 s) merged
 /// while the clip fits, longer ones split. No islands means the whole file in chunks, unless
 /// it is too short to be worth sending.
 pub fn plan_clips(islands: &[(u64, u64)], duration_ms: u64) -> Vec<(u64, u64)> {
+    plan_clips_with(islands, duration_ms, MERGE_GAP_MS)
+}
+
+/// `plan_clips` with another merge gap.
+pub fn plan_clips_with(
+    islands: &[(u64, u64)],
+    duration_ms: u64,
+    merge_gap_ms: u64,
+) -> Vec<(u64, u64)> {
     if islands.is_empty() {
         return if duration_ms >= MIN_WHOLE_MS {
             split_span(0, duration_ms).collect()
@@ -142,7 +153,7 @@ pub fn plan_clips(islands: &[(u64, u64)], duration_ms: u64) -> Vec<(u64, u64)> {
         }
         match clips.last_mut() {
             Some(last)
-                if start.saturating_sub(last.1) < MERGE_GAP_MS && end - last.0 <= MAX_CLIP_MS =>
+                if start.saturating_sub(last.1) < merge_gap_ms && end - last.0 <= MAX_CLIP_MS =>
             {
                 last.1 = end;
             }
@@ -174,6 +185,11 @@ fn model_dir() -> Option<PathBuf> {
             dirs::cache_dir().map(|c| c.join("openwhispr/parakeet-models").join(MODEL_NAME))
         })
         .filter(|dir| dir.join("tokens.txt").is_file())
+}
+
+/// `SCRAWL_SHERPA_PROVIDER` (`cpu` or `cuda`); CPU unless asked.
+fn provider() -> String {
+    std::env::var("SCRAWL_SHERPA_PROVIDER").unwrap_or_else(|_| "cpu".into())
 }
 
 /// A sherpa-onnx server of our own, stopped when dropped. It is started per recording, so no
@@ -219,6 +235,7 @@ impl Server {
                 "--num-threads=4",
                 "--num-work-threads=1",
             ])
+            .arg(format!("--provider={}", provider()))
             .arg(format!("--port={port}"))
             .arg("--log-file=/dev/null")
             .current_dir(std::env::temp_dir())
@@ -319,12 +336,33 @@ pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
         return Ok(transcript);
     }
     let server = Server::start(&binary, &model)?;
+    let words = transcribe_clips(&server, &samples, &clips, CLIP_PAD_MS)?;
+    transcript.words = words;
+    transcript.segments = segments(&transcript.words);
+    transcript.text = transcript
+        .words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(transcript)
+}
+
+/// Sends each clip, padded by `pad_ms` each side, and gathers its words with times on the
+/// recording's clock. Only an every-clip failure is an error.
+fn transcribe_clips(
+    server: &Server,
+    samples: &[f32],
+    clips: &[(u64, u64)],
+    pad_ms: u64,
+) -> Result<Vec<WordTiming>> {
     let total = clips.len();
     let mut failed = 0;
-    for (start, end) in clips {
-        let from_ms = start.saturating_sub(CLIP_PAD_MS);
+    let mut all = Vec::new();
+    for &(start, end) in clips {
+        let from_ms = start.saturating_sub(pad_ms);
         let from = (from_ms * SAMPLES_PER_MS) as usize;
-        let to = (((end + CLIP_PAD_MS) * SAMPLES_PER_MS) as usize).min(samples.len());
+        let to = (((end + pad_ms) * SAMPLES_PER_MS) as usize).min(samples.len());
         if from >= to {
             continue;
         }
@@ -336,7 +374,7 @@ pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
                         "Parakeet heard only noise at {start} ms; dropped its words"
                     ));
                 } else {
-                    transcript.words.extend(clip_words);
+                    all.extend(clip_words);
                 }
             }
             Err(error) => {
@@ -350,14 +388,7 @@ pub fn transcribe(wav: &Path) -> Result<TranscriptData> {
     if failed == total {
         bail!("Parakeet failed on all {total} clips");
     }
-    transcript.segments = segments(&transcript.words);
-    transcript.text = transcript
-        .words
-        .iter()
-        .map(|w| w.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    Ok(transcript)
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -451,6 +482,24 @@ mod tests {
     }
 
     #[test]
+    fn a_thinking_pause_stays_in_one_clip_but_a_long_one_splits() {
+        assert_eq!(
+            plan_clips(&[(0, 1_000), (3_000, 4_000)], 5_000),
+            [(0, 4_000)]
+        );
+        assert_eq!(
+            plan_clips(&[(0, 1_000), (3_600, 4_000)], 5_000),
+            [(0, 1_000), (3_600, 4_000)]
+        );
+    }
+
+    #[test]
+    fn padded_neighbouring_clips_do_not_overlap() {
+        let clips = plan_clips(&[(0, 1_000), (3_500, 4_000)], 5_000);
+        assert!(clips[1].0 - clips[0].1 >= 2 * CLIP_PAD_MS);
+    }
+
+    #[test]
     fn merging_never_passes_30_seconds() {
         let clips = plan_clips(&[(0, 20_000), (20_300, 40_000)], 40_000);
         assert_eq!(clips, [(0, 20_000), (20_300, 40_000)]);
@@ -478,6 +527,42 @@ mod tests {
             [(0, 30_000), (30_000, 60_000), (60_000, 65_000)]
         );
         assert!(plan_clips(&[], 300).is_empty());
+    }
+
+    /// A/B of clip plans on a real capture's audio (read only):
+    /// `SCRAWL_AB_WAV=... cargo test -- --ignored --nocapture ab_clip_plans`.
+    #[test]
+    #[ignore]
+    fn ab_clip_plans() {
+        let wav = std::env::var("SCRAWL_AB_WAV").expect("SCRAWL_AB_WAV");
+        let samples = audio::decode_wav_16k(&std::fs::read(wav).unwrap()).unwrap();
+        let duration = samples.len() as u64 / SAMPLES_PER_MS;
+        let islands = audio::speech_islands(&samples);
+        println!("duration {duration} ms, islands {islands:?}");
+        let (binary, model) = requirements().unwrap();
+        let started = std::time::Instant::now();
+        let server = Server::start(&binary, &model).unwrap();
+        println!("provider {} started in {:?}", provider(), started.elapsed());
+        let plans: [(&str, Vec<(u64, u64)>, u64); 4] = [
+            ("current gap700 pad200", plan_clips_with(&islands, duration, 700), 200),
+            ("gap2500 pad400", plan_clips_with(&islands, duration, 2_500), 400),
+            ("gap4000 pad400", plan_clips_with(&islands, duration, 4_000), 400),
+            ("whole file", vec![(0, duration.min(MAX_CLIP_MS))], 0),
+        ];
+        for (name, clips, pad) in plans {
+            let started = std::time::Instant::now();
+            let words = transcribe_clips(&server, &samples, &clips, pad).unwrap();
+            let text: Vec<_> = words.iter().map(|w| w.text.as_str()).collect();
+            println!(
+                "== {name}: {} clips {clips:?}, {} words, {:?}\n{}\n first {:?} last {:?}",
+                clips.len(),
+                words.len(),
+                started.elapsed(),
+                text.join(" "),
+                words.first().map(|w| w.t0),
+                words.last().map(|w| w.t1)
+            );
+        }
     }
 
     /// Loads the 0.6B model (~1 GB RAM, a few seconds): `cargo test -- --ignored parakeet`.

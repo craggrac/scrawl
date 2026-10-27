@@ -2888,7 +2888,7 @@ impl ScrawlCoordinator {
                                 .unwrap_or_default();
                             activity
                         });
-                        let audio = audio_recorder.and_then(|r| r.stop().ok());
+                        let audio = audio_recorder.and_then(AudioRecorder::stop_noting);
                         (
                             screen_handle.join().unwrap(),
                             audio,

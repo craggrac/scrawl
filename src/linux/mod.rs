@@ -9,6 +9,7 @@ pub mod hypr;
 pub mod input;
 pub mod media;
 pub mod parakeet;
+pub mod pwmic;
 pub mod record;
 pub mod redact;
 pub mod replay;
@@ -176,11 +177,7 @@ fn capture_into(
         let recording = session.stop()?;
         let mut activity = window_log.map(hypr::WindowLogger::stop).unwrap_or_default();
         activity.dev_context = dev_context;
-        let recorded_audio = audio.and_then(|a| {
-            a.stop()
-                .inspect_err(|error| scrawl_log(format!("Audio: {error:#}")))
-                .ok()
-        });
+        let recorded_audio = audio.and_then(AudioRecorder::stop_noting);
         if recorded_audio
             .as_ref()
             .and_then(|a| audio::decode_wav_16k(&a.wav_bytes).ok())

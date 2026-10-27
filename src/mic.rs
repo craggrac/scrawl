@@ -112,7 +112,14 @@ pub fn save_in(path: &std::path::Path, id: &str, inputs: &Inputs) -> anyhow::Res
     crate::handoff::set_config_value_in(path, "microphone", value)
 }
 
+/// Enumerates input devices (PipeWire sources, by node name; never on the UI thread).
+#[cfg(target_os = "linux")]
+pub fn inputs() -> Inputs {
+    crate::linux::pwmic::inputs()
+}
+
 /// Enumerates input devices (CoreAudio, a few ms; never on the UI thread).
+#[cfg(not(target_os = "linux"))]
 pub fn inputs() -> Inputs {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
@@ -136,6 +143,7 @@ pub fn inputs() -> Inputs {
 }
 
 /// The cpal device for `id`, if connected.
+#[cfg(not(target_os = "linux"))]
 pub fn device(id: &str) -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
     cpal::default_host()
