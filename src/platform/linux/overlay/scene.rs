@@ -35,6 +35,8 @@ pub struct Segment {
 pub struct Pin {
     pub pos: [f32; 2],
     pub radius: f32,
+    /// Of full opacity: a pin holds, then fades like finished ink.
+    pub alpha: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -77,9 +79,9 @@ pub fn finished_alpha(age_ms: u64) -> Option<f32> {
 /// that is holding or fading. The overlay then looks every frame; otherwise only when woken.
 pub fn animating(strokes: &[Stroke], live: Option<&Stroke>, now_ms: u64) -> bool {
     live.is_some_and(|s| !s.laser && s.pin.is_none())
-        || strokes.iter().any(|s| {
-            s.pin.is_none() && !s.laser && finished_alpha(now_ms.saturating_sub(s.t1)).is_some()
-        })
+        || strokes
+            .iter()
+            .any(|s| !s.laser && finished_alpha(now_ms.saturating_sub(s.t1)).is_some())
 }
 
 /// The scene at `now_ms` (the capture clock) for `strokes` (finished, oldest first) and the
@@ -100,12 +102,17 @@ pub fn build(
         .chain(live.map(|s| (s, true)))
     {
         if stroke.pin.is_some() {
+            // On screen a pin holds then fades like finished ink (the recording keeps it).
+            let Some(alpha) = finished_alpha(now_ms.saturating_sub(stroke.t1)) else {
+                continue;
+            };
             if let Some(&first) = stroke.normalized_points().first()
                 && pins.len() < MAX_PINS
             {
                 pins.push(Pin {
                     pos: to_output(target, first),
                     radius: PIN_RADIUS_PT,
+                    alpha,
                 });
             }
             continue;
@@ -241,22 +248,37 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_is_a_marker_at_its_point_that_never_fades() {
+    fn a_pin_is_a_marker_at_its_point_full_at_first() {
         let pin = Stroke {
             pin: Some(1),
             ..stroke(1_000, &[[0.25, 0.4]])
         };
-        for now in [1_000, 3_000, 600_000] {
+        for now in [1_000, 1_650] {
             let scene = build(std::slice::from_ref(&pin), None, now, [100.0, 50.0, 800.0, 400.0], None);
             assert!(scene.segments.is_empty());
             assert_eq!(
                 scene.pins,
                 vec![Pin {
                     pos: [300.0, 210.0],
-                    radius: 11.5
+                    radius: 11.5,
+                    alpha: 1.0
                 }]
             );
         }
+    }
+
+    #[test]
+    fn a_pin_holds_then_fades_like_ink_and_is_gone_after_hold_plus_fade() {
+        let pin = Stroke {
+            pin: Some(1),
+            ..stroke(1_000, &[[0.5, 0.5]])
+        };
+        let at = |age: u64| build(std::slice::from_ref(&pin), None, pin.t1 + age, TARGET, None);
+        assert_eq!(at(0).pins[0].alpha, 1.0);
+        assert!((at(975).pins[0].alpha - 0.25).abs() < 1e-6);
+        assert!(at(1_299).pins[0].alpha < 1e-4);
+        assert!(at(1_300).pins.is_empty());
+        assert!(at(600_000).is_empty());
     }
 
     #[test]
@@ -293,8 +315,10 @@ mod tests {
         assert!(animating(&[], Some(&ink), 5_000));
         assert!(animating(std::slice::from_ref(&ink), None, end + 1_299));
         assert!(!animating(std::slice::from_ref(&ink), None, end + 1_300));
-        // A pin never fades, so it needs no frames.
-        assert!(!animating(&[pin], None, 1_100));
+        // A pin holds and fades like ink, so it needs frames until it is gone.
+        assert!(animating(std::slice::from_ref(&pin), None, 1_100));
+        assert!(animating(std::slice::from_ref(&pin), None, 1_000 + 1_299));
+        assert!(!animating(&[pin], None, 1_000 + 1_300));
         let laser = Stroke {
             laser: true,
             ..ink
