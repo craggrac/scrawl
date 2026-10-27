@@ -362,14 +362,15 @@ impl Raster {
     fn pin(&mut self, pin: &Pin, area: Rect) {
         let reach = pin.radius + PIN_REACH_PT;
         let boxed = self.pixel_box(pin.pos, pin.pos, reach, area);
+        let alpha = pin.alpha.clamp(0.0, 1.0);
         let stride = area.width() as usize;
         for y in boxed.y0..boxed.y1 {
             for x in boxed.x0..boxed.x1 {
                 let p = [(x as f32 + 0.5) / self.scale, (y as f32 + 0.5) / self.scale];
                 let d = (p[0] - pin.pos[0]).hypot(p[1] - pin.pos[1]);
                 if d < reach {
-                    let halo = smoothstep(pin.radius + 2.0, pin.radius + 0.8, d);
-                    let fill = smoothstep(pin.radius + 0.75, pin.radius - 0.75, d);
+                    let halo = smoothstep(pin.radius + 2.0, pin.radius + 0.8, d) * alpha;
+                    let fill = smoothstep(pin.radius + 0.75, pin.radius - 0.75, d) * alpha;
                     let slot = &mut self.cover
                         [(y - area.y0) as usize * stride + (x - area.x0) as usize];
                     slot.halo = slot.halo.max(halo);
@@ -533,6 +534,7 @@ mod tests {
             pins: vec![Pin {
                 pos: [150.0, 150.5],
                 radius: 11.5,
+                alpha: 1.0,
             }],
             ..Scene::default()
         });
@@ -548,6 +550,29 @@ mod tests {
         // Beyond the halo (radius + 3.5), nothing.
         assert_eq!(raster.pixel(165, 150), [0; 4]);
         assert_eq!(raster.pixel(150, 166), [0; 4]);
+    }
+
+    #[test]
+    fn a_fading_pin_and_its_halo_are_drawn_at_its_alpha_and_gone_at_zero() {
+        let pin = |alpha| Scene {
+            pins: vec![Pin {
+                pos: [150.0, 150.5],
+                radius: 11.5,
+                alpha,
+            }],
+            ..Scene::default()
+        };
+        let mut raster = Raster::new(300, 300, 1);
+        raster.draw(&pin(0.5));
+        // Half-red over the half-opaque halo under it: more than the fill, well under full.
+        let mid = raster.pixel(150, 150)[3];
+        assert!(mid > 128 && mid < 200, "{mid}");
+        let halo = raster.pixel(162, 150);
+        assert!(halo[3] > 0 && halo[3] <= 105, "{halo:?}");
+        // An empty scene clears what was drawn.
+        raster.draw(&Scene::default());
+        assert_eq!(raster.pixel(150, 150), [0; 4]);
+        assert_eq!(raster.pixel(162, 150), [0; 4]);
     }
 
     #[test]
