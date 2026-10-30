@@ -5874,7 +5874,7 @@ pub fn run_app(
     let app = Application::new().with_assets(crate::icons::Assets);
     app.run(move |cx: &mut App| {
         scrawl_log(format!("run_app started pid={}", std::process::id()));
-        crate::linux::hypr::install_window_rules(
+        crate::linux::hypr::keep_window_rules(
             [PILL_WINDOW_W, PILL_WINDOW_H, PILL_WINDOW_TOP],
             [REVIEW_WINDOW_W, REVIEW_WINDOW_H],
             [SETTINGS_WINDOW_W, SETTINGS_WINDOW_H],

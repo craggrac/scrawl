@@ -1,7 +1,7 @@
 //! Hyprland through its IPC socket: what to record, which windows are on screen and where the
 //! cursor is. Replies are the same JSON `hyprctl -j` prints, read without a process per call.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -103,13 +103,18 @@ struct ActiveWindow {
     address: String,
 }
 
-/// One request on `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`, and its
-/// reply.
-fn hypr_request(request: &str) -> Result<Vec<u8>> {
+/// `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE`, where this session's sockets live.
+fn instance_dir() -> Result<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
     let instance =
         std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").context("Not running under Hyprland")?;
-    let path = PathBuf::from(runtime).join("hypr").join(instance).join(".socket.sock");
+    Ok(PathBuf::from(runtime).join("hypr").join(instance))
+}
+
+/// One request on `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`, and its
+/// reply.
+fn hypr_request(request: &str) -> Result<Vec<u8>> {
+    let path = instance_dir()?.join(".socket.sock");
     let mut stream = UnixStream::connect(&path)
         .with_context(|| format!("Could not reach Hyprland at {}", path.display()))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -166,6 +171,42 @@ pub fn install_window_rules(pill: [f32; 3], review: [f32; 2], settings: [f32; 2]
         }
         scrawl_log(format!("Hyprland rule (Lua) {rule:?}: {error}"));
     }
+}
+
+/// `install_window_rules` now and again after every config reload: a reload (which Hyprland
+/// does by itself whenever a config file changes) drops session rules, and the capsule would
+/// then open as an ordinary tiled window. Watches the event socket on its own thread.
+pub fn keep_window_rules(pill: [f32; 3], review: [f32; 2], settings: [f32; 2]) {
+    install_window_rules(pill, review, settings);
+    let spawned = std::thread::Builder::new()
+        .name("scrawl-hypr-events".into())
+        .spawn(move || {
+            if let Err(error) = watch_reloads(|| install_window_rules(pill, review, settings)) {
+                scrawl_log(format!("Hyprland events: {error:#}; rules are not kept across reloads"));
+            }
+        });
+    if let Err(error) = spawned {
+        scrawl_log(format!("Hyprland events: could not spawn the watcher: {error}"));
+    }
+}
+
+/// Calls `reloaded` for each `configreloaded` event on `.socket2.sock`, until it closes.
+fn watch_reloads(mut reloaded: impl FnMut()) -> Result<()> {
+    let path = instance_dir()?.join(".socket2.sock");
+    let stream = UnixStream::connect(&path)
+        .with_context(|| format!("Could not reach Hyprland's events at {}", path.display()))?;
+    for line in std::io::BufReader::new(stream).lines() {
+        if is_config_reload(&line?) {
+            scrawl_log("Hyprland config reloaded; installing window rules again");
+            reloaded();
+        }
+    }
+    Ok(())
+}
+
+/// Whether an event-socket line (`name>>data`) is Hyprland's config reload.
+fn is_config_reload(line: &str) -> bool {
+    line.split_once(">>").map_or(line, |(name, _)| name) == "configreloaded"
 }
 
 /// `install_window_rules` for a Hyprland without `eval`.
@@ -967,6 +1008,14 @@ pub fn legacy_window_rules(review: [f32; 2], settings: [f32; 2]) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_config_reload_event_reinstalls_rules() {
+        assert!(is_config_reload("configreloaded>>"));
+        assert!(is_config_reload("configreloaded"));
+        assert!(!is_config_reload("openwindow>>abc,1,scrawl-pill,"));
+        assert!(!is_config_reload("configreloadedx>>"));
+    }
 
     #[test]
     fn only_a_missing_eval_falls_back_to_windowrulev2() {
